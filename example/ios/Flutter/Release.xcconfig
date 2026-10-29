@@ -1,2 +1,5 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
 #include "Generated.xcconfig"
+
+// Xcode 27 lipo rejects multi-arch -verify_arch; build the simulator for arm64 only.
+ARCHS[sdk=iphonesimulator*] = arm64
