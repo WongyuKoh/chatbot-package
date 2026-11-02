@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../config/gist_chatbot_config.dart';
 import '../state/chat_controller.dart';
@@ -40,6 +41,9 @@ class _MessageListState extends State<MessageList> {
 
   /// 맨 아래로 버튼의 스크롤 애니메이션 진행 여부
   bool _scrollingToBottom = false;
+
+  /// 레이아웃 중 요청된 버튼 갱신이 다음 프레임으로 예약돼 있는지 여부
+  bool _scrollButtonUpdateScheduled = false;
 
   @override
   void initState() {
@@ -145,6 +149,18 @@ class _MessageListState extends State<MessageList> {
 
   /// 따라가는 중에는 숨김: 스트리밍 중 바닥과 잠깐 벌어질 때 깜빡이지 않도록
   void _updateScrollButton() {
+    // 관성 스크롤 중 콘텐츠 길이가 바뀌면 레이아웃 도중 스크롤 알림이 동기로 옴.
+    // 이때 값을 바꾸면 빌드가 예약돼 "Build scheduled during frame" → 프레임이 끝난 뒤 반영
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      if (_scrollButtonUpdateScheduled) return;
+      _scrollButtonUpdateScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollButtonUpdateScheduled = false;
+        if (mounted) _updateScrollButton();
+      });
+      return;
+    }
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     if (!position.hasContentDimensions) return;
