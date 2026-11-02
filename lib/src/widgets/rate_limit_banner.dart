@@ -25,6 +25,14 @@ class _RateLimitBannerState extends State<RateLimitBanner> {
   @override
   void initState() {
     super.initState();
+    // 시간이 지난 뒤 패널을 다시 열면 이미 만료된 채로 생성됨.
+    // 빌드 중 onExpired가 부모를 갱신하면 에러이므로 프레임이 끝난 뒤 해제
+    if (DateTime.now().millisecondsSinceEpoch >= widget.retryAt) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onExpired();
+      });
+      return;
+    }
     _update();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _update());
   }
