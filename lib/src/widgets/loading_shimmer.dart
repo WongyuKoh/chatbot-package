@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'thinking_dots.dart';
+
 /// 로딩 문구 shimmer + thinking dots (웹 위젯의 loading-text-shimmer / thinking-dot)
 class LoadingIndicatorRow extends StatefulWidget {
   const LoadingIndicatorRow({
@@ -16,9 +18,8 @@ class LoadingIndicatorRow extends StatefulWidget {
 }
 
 class _LoadingIndicatorRowState extends State<LoadingIndicatorRow>
-    with TickerProviderStateMixin {
+    with SingleTickerProviderStateMixin {
   late final AnimationController _shimmerController;
-  late final AnimationController _dotsController;
 
   @override
   void initState() {
@@ -28,17 +29,11 @@ class _LoadingIndicatorRowState extends State<LoadingIndicatorRow>
       vsync: this,
       duration: const Duration(seconds: 3),
     )..repeat();
-    // thinking-dot: 1.4s ease-in-out infinite
-    _dotsController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat();
   }
 
   @override
   void dispose() {
     _shimmerController.dispose();
-    _dotsController.dispose();
     super.dispose();
   }
 
@@ -87,48 +82,7 @@ class _LoadingIndicatorRowState extends State<LoadingIndicatorRow>
           ),
         ),
         const SizedBox(width: 6),
-        AnimatedBuilder(
-          animation: _dotsController,
-          builder: (context, _) {
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: List.generate(3, (i) {
-                // delay 0 / 0.2s / 0.4s, keyframes: 0%,80%,100% → 0.3/0.8, 40% → 1/1
-                final delay = i * 0.2 / 1.4;
-                var t = _dotsController.value - delay;
-                if (t < 0) t += 1;
-                double progress;
-                if (t <= 0.4) {
-                  progress = t / 0.4;
-                } else if (t <= 0.8) {
-                  progress = 1 - (t - 0.4) / 0.4;
-                } else {
-                  progress = 0;
-                }
-                final eased = Curves.easeInOut.transform(progress);
-                final opacity = 0.3 + 0.7 * eased;
-                final scale = 0.8 + 0.2 * eased;
-                return Padding(
-                  padding: EdgeInsets.only(left: i == 0 ? 0 : 6),
-                  child: Opacity(
-                    opacity: opacity,
-                    child: Transform.scale(
-                      scale: scale,
-                      child: Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: widget.color,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              }),
-            );
-          },
-        ),
+        ThinkingDots(color: widget.color),
       ],
     );
   }

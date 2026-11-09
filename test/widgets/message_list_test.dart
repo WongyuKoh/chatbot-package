@@ -81,10 +81,18 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  /// 생성 중 버튼의 점 애니메이션은 계속 돌아서 pumpAndSettle이 끝나지 않으므로,
+  /// 스크롤 애니메이션이 끝날 만큼만 프레임을 돌린다.
+  Future<void> pumpFrames(WidgetTester tester) async {
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+  }
+
   /// 위로 스크롤 (손가락을 아래로 끌기)
   Future<void> scrollUp(WidgetTester tester) async {
     await tester.drag(find.byType(ListView), const Offset(0, 400));
-    await tester.pumpAndSettle();
+    await pumpFrames(tester);
   }
 
   ScrollPosition listPosition(WidgetTester tester) =>
@@ -104,7 +112,7 @@ void main() {
 
       await scrollUp(tester);
       expect(find.byTooltip(_tooltip), findsOneWidget);
-      expect(find.text(_generatingLabel), findsNothing);
+      expect(find.bySemanticsLabel(_generatingLabel), findsNothing);
 
       await tester.tap(find.byTooltip(_tooltip));
       await tester.pumpAndSettle();
@@ -120,20 +128,20 @@ void main() {
       await askAndStream(tester);
 
       await scrollUp(tester);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       // 위에서 읽는 동안 답변이 길어져도 화면을 끌어내리지 않음
       final position = listPosition(tester);
       final pixels = position.pixels;
       api.chunk(_longAnswer(60));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(position.pixels, pixels);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       // 답변이 끝나면 평소의 원형 버튼으로 돌아감
       api.finish(_longAnswer(60));
       await tester.pumpAndSettle();
-      expect(find.text(_generatingLabel), findsNothing);
+      expect(find.bySemanticsLabel(_generatingLabel), findsNothing);
       expect(find.byTooltip(_tooltip), findsOneWidget);
     });
 
@@ -174,7 +182,7 @@ void main() {
       );
       expect(codeScroll, findsOneWidget);
       await tester.drag(codeScroll, const Offset(-200, 0));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       final codePosition = tester
           .state<ScrollableState>(
             find.descendant(of: codeScroll, matching: find.byType(Scrollable)),
@@ -185,9 +193,9 @@ void main() {
       // 코드 블록을 보는 동안 답변이 길어져도 화면을 끌어내리지 않음
       final pixels = position.pixels;
       api.chunk('$withCode\n\n${_longAnswer(20)}');
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(position.pixels, pixels);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       api.finish('$withCode\n\n${_longAnswer(20)}');
       await tester.pumpAndSettle();

@@ -257,12 +257,12 @@ class _MessageListState extends State<MessageList> {
             ),
           ),
         ),
-        // 입력창 위 가운데. 터치 영역(48px)이 보이는 버튼(36px)보다 6px씩 커서
-        // bottom 6이면 입력창과 보이는 간격은 12px
+        // 입력창 위 가운데. 터치 영역(48px)이 보이는 버튼(32px)보다 8px씩 커서
+        // bottom 4이면 입력창과 보이는 간격은 12px (웹 위젯의 bottom-3)
         Positioned(
           left: 0,
           right: 0,
-          bottom: 6,
+          bottom: 4,
           child: Center(
             child: ValueListenableBuilder<bool>(
               valueListenable: _showScrollButton,
