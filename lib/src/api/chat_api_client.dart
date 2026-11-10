@@ -25,17 +25,18 @@ class ChatApiException implements Exception {
   String toString() => 'ChatApiException: $message (status: $statusCode)';
 }
 
-/// 스트리밍 중지용 토큰. cancel() 호출 시 진행 중인 스트림 구독을 끊는다.
+/// 스트리밍 중지용 토큰. 요청 하나에 하나씩 만들며, cancel()을 호출하면
+/// 그 요청을 abort한다 (응답 헤더를 기다리는 중이든 스트림을 읽는 중이든).
 class StreamCancelToken {
-  bool _cancelled = false;
-  void Function()? _onCancel;
+  final Completer<void> _cancelled = Completer<void>();
 
-  bool get isCancelled => _cancelled;
+  bool get isCancelled => _cancelled.isCompleted;
+
+  /// cancel()이 호출되면 완료된다. 오류로 완료되지 않는다.
+  Future<void> get whenCancelled => _cancelled.future;
 
   void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    _onCancel?.call();
+    if (!_cancelled.isCompleted) _cancelled.complete();
   }
 }
 
@@ -48,6 +49,12 @@ class ChatStreamProtocolException extends ChatApiException {
 /// `[DONE]` 없이 스트림이 끝났을 때. 서버 저장 여부를 알 수 없는 비정상 중단이다.
 class ChatStreamIncompleteException extends ChatApiException {
   ChatStreamIncompleteException() : super('Stream ended before [DONE]');
+}
+
+/// 스트림 도중 서버가 보낸 `error` 이벤트. 이 뒤로 `[DONE]`은 오지 않는다.
+/// [message]는 코드가 아닌 진단용 문자열이므로 내용으로 분기하지 않는다.
+class ChatStreamErrorException extends ChatApiException {
+  ChatStreamErrorException(super.message);
 }
 
 /// HTTP 오류 응답을 예외로 바꾼다. 프록시 오류처럼 JSON이 아닌 본문도 올 수 있다.
@@ -71,7 +78,7 @@ ChatApiException _errorFromResponse(String body, int statusCode) {
         message = msg;
       }
       final rawLimit = json['limit'];
-      if (rawLimit is int) limit = rawLimit;
+      if (rawLimit is num) limit = rawLimit.toInt();
     }
   } catch (_) {}
   return ChatApiException(message, statusCode: statusCode, limit: limit);
@@ -162,13 +169,13 @@ class ChatApiClient {
     return GetMessagesResponse.fromJson(data);
   }
 
-  /// 가장 최근에 저장된 assistant 메시지 조회.
+  /// 가장 최근에 저장된 assistant 메시지 조회 (맨 끝 메시지가 답변일 때만).
   /// 스트리밍 응답에는 메시지 ID가 없으므로, 스트림 완료 직후 이 API로
-  /// 서버 메시지 ID를 얻어 피드백/재생성에 사용한다.
+  /// 서버 메시지 ID와 metadata를 얻어 피드백/재생성에 사용한다.
   Future<ChatMessageDto?> getLatestAssistantMessage() async {
     final res = await getMessages(limit: 1);
     final latest = res.messages.isNotEmpty ? res.messages.first : null;
-    return latest != null && latest.role == 'assistant' ? latest : null;
+    return latest != null && latest.isAssistant ? latest : null;
   }
 
   /// assistant 답변 피드백 등록/변경
@@ -217,6 +224,9 @@ class ChatApiClient {
   }
 
   /// SSE 채팅 스트림 공통 처리 (웹 위젯의 streamWidgetChatResponse와 동일 규칙)
+  ///
+  /// HTTP 200은 스트리밍 시작일 뿐이고 `[DONE]`을 받아야 정상 완료다.
+  /// 자동 재접속·재전송은 하지 않는다 (재전송은 새 질문으로 처리될 수 있다).
   Future<SendChatResponse> _streamChatResponse(
     String path, {
     String? body,
@@ -224,12 +234,19 @@ class ChatApiClient {
     void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
   }) async {
-    final req = http.Request('POST', _uri(path))
-      ..headers.addAll(_headers(json: body != null))
-      ..headers['Accept'] = 'text/event-stream';
+    if (cancelToken?.isCancelled ?? false) throw StreamCancelledException();
+
+    final req =
+        http.AbortableRequest(
+            'POST',
+            _uri(path),
+            abortTrigger: cancelToken?.whenCancelled,
+          )
+          ..headers.addAll(_headers(json: body != null))
+          ..headers['Accept'] = 'text/event-stream';
     if (body != null) req.body = body;
 
-    final streamedResponse = await _client.send(req);
+    final streamedResponse = await _sendCancellable(req, cancelToken);
 
     if (streamedResponse.statusCode != 200) {
       final errorBody = await streamedResponse.stream.bytesToString();
@@ -241,8 +258,7 @@ class ChatApiClient {
     final contentType = streamedResponse.headers['content-type'];
     if (contentType != null &&
         !contentType.toLowerCase().contains('text/event-stream')) {
-      // 구독하지 않은 응답 스트림이 연결을 붙잡지 않도록 버린다
-      unawaited(streamedResponse.stream.drain<void>().catchError((_) {}));
+      _discard(streamedResponse);
       throw ChatStreamProtocolException(
         'Expected text/event-stream but got $contentType',
       );
@@ -250,7 +266,7 @@ class ChatApiClient {
 
     final completer = Completer<SendChatResponse>();
     var fullText = '';
-    var resources = <RawResource>[];
+    var resources = const <RawResource>[];
     var notices = const <ChatSource>[];
     var webSources = const <ChatSource>[];
     var steps = const <ResearchStep>[];
@@ -260,12 +276,12 @@ class ChatApiClient {
         completer.complete(
           SendChatResponse(
             answer: fullText,
-            sources: [
-              for (final r in resources)
-                resolveSource(r, resourceCenterUrl: _resourceCenterUrl),
-              ...notices,
-              ...webSources,
-            ],
+            sources: combineSources(
+              resources: resources,
+              notices: notices,
+              webSources: webSources,
+              resourceCenterUrl: _resourceCenterUrl,
+            ),
             steps: steps,
           ),
         );
@@ -284,6 +300,9 @@ class ChatApiClient {
     final frame = <String>[];
 
     void handleFrame(String data) {
+      // 완료·오류·중지로 요청이 끝난 뒤의 프레임은 적용하지 않는다
+      if (completer.isCompleted) return;
+
       // [DONE]은 JSON이 아니므로 파싱보다 먼저 비교한다
       if (data == '[DONE]') {
         completeWith();
@@ -305,13 +324,15 @@ class ChatApiClient {
       final type = parsed['type'];
       if (type != null && !_knownEventTypes.contains(type)) return;
 
+      // error에는 type이 없다. 받으면 실패로 끝내고 [DONE]을 기다리지 않는다
       final error = parsed['error'];
       if (error != null) {
-        failWith(ChatApiException(error.toString()));
+        failWith(ChatStreamErrorException(error.toString()));
         subscription.cancel();
         return;
       }
 
+      // content에도 type이 없다. 받은 순서대로 그대로 이어 붙인다
       final content = parsed['content'];
       if (content is String) {
         fullText += content;
@@ -325,14 +346,9 @@ class ChatApiClient {
             steps = upsertStep(steps, step);
             onSteps?.call(steps);
           }
+        // 출처 이벤트는 올 때마다 해당 종류의 목록을 통째로 바꾼다
         case 'resources':
-          final raw = parsed['resources'];
-          resources = raw is List
-              ? raw
-                    .whereType<Map<String, dynamic>>()
-                    .map(RawResource.fromJson)
-                    .toList()
-              : [];
+          resources = parseResources(parsed['resources']);
         case 'sources':
           notices = parseExternalSources(
             parsed['sources'],
@@ -346,6 +362,8 @@ class ChatApiClient {
       }
     }
 
+    // 네트워크 조각과 프레임 경계는 무관하다. 스트리밍 UTF-8 디코더로 한글 경계를
+    // 보존하고, 줄 단위(LF/CRLF)로 다시 나눈 뒤 빈 줄에서 프레임을 닫는다.
     subscription = streamedResponse.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -371,20 +389,59 @@ class ChatApiClient {
               failWith(ChatStreamIncompleteException());
             }
           },
-          onError: failWith,
+          onError: (Object error, StackTrace st) {
+            failWith(
+              error is http.RequestAbortedException
+                  ? StreamCancelledException()
+                  : error,
+              st,
+            );
+          },
           cancelOnError: true,
         );
 
-    cancelToken?._onCancel = () {
-      subscription.cancel();
-      failWith(StreamCancelledException());
-    };
-    if (cancelToken?.isCancelled ?? false) {
-      subscription.cancel();
-      failWith(StreamCancelledException());
+    // 사용자 중지: 구독을 끊어 뒤따르는 이벤트가 이 요청에 적용되지 않게 한다
+    if (cancelToken != null) {
+      unawaited(
+        cancelToken.whenCancelled.then((_) {
+          if (completer.isCompleted) return;
+          failWith(StreamCancelledException());
+          subscription.cancel();
+        }),
+      );
     }
 
     return completer.future;
+  }
+
+  /// 요청을 보내고 응답 헤더를 기다린다. 첫 응답까지 오래 걸릴 수 있으므로
+  /// 시간 제한은 두지 않고, 기다리는 동안에도 [cancelToken]으로 중지할 수 있게 한다.
+  Future<http.StreamedResponse> _sendCancellable(
+    http.BaseRequest request,
+    StreamCancelToken? cancelToken,
+  ) async {
+    final pending = _client.send(request);
+    if (cancelToken == null) return pending;
+
+    // abort를 지원하지 않는 클라이언트라도 중지 즉시 호출자에게 돌려준다
+    final response = await Future.any<http.StreamedResponse?>([
+      pending,
+      cancelToken.whenCancelled.then((_) => null),
+    ]).onError<http.RequestAbortedException>((_, _) => null);
+
+    if (response == null || cancelToken.isCancelled) {
+      // 늦게 도착하는 응답이 연결을 붙잡지 않도록 버린다
+      unawaited(pending.then(_discard, onError: (_) {}));
+      throw StreamCancelledException();
+    }
+    return response;
+  }
+
+  /// 읽지 않을 응답 본문을 닫는다
+  void _discard(http.StreamedResponse response) {
+    unawaited(
+      response.stream.listen(null, onError: (_) {}).cancel().catchError((_) {}),
+    );
   }
 }
 

@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../config/gist_chatbot_config.dart';
 import '../state/chat_message.dart';
+import 'external_link.dart';
 import 'loading_shimmer.dart';
 import 'pressable.dart';
 import 'research_steps.dart';
@@ -122,10 +122,7 @@ class _AssistantMarkdown extends StatelessWidget {
           style: TextStyle(color: colors.text, fontSize: 14, height: 1.4),
           linkBuilder: (context, span, url, style) {
             return GestureDetector(
-              onTap: () => launchUrl(
-                Uri.parse(url),
-                mode: LaunchMode.externalApplication,
-              ),
+              onTap: () => openExternalLink(url),
               child: Text.rich(
                 span,
                 style: style.copyWith(
@@ -221,10 +218,7 @@ class _SourceBadge extends StatelessWidget {
 
   Widget _buildBadge(IconData icon) {
     return Pressable(
-      onTap: () => launchUrl(
-        Uri.parse(source.url),
-        mode: LaunchMode.externalApplication,
-      ),
+      onTap: () => openExternalLink(source.url),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
@@ -284,10 +278,7 @@ class _SourceImage extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: GestureDetector(
-        onTap: () => launchUrl(
-          Uri.parse(source.url),
-          mode: LaunchMode.externalApplication,
-        ),
+        onTap: () => openExternalLink(source.url),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Image.network(

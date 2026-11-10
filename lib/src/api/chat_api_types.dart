@@ -60,15 +60,24 @@ class ChatMessageDto {
     required this.content,
     this.feedback,
     this.createdAt,
+    this.metadata,
   });
 
   factory ChatMessageDto.fromJson(Map<String, dynamic> json) {
+    final feedback = json['feedback'];
+    final createdAt = json['createdAt'];
+    final metadata = json['metadata'];
     return ChatMessageDto(
       id: json['id'] as String? ?? '',
       role: json['role'] as String? ?? 'user',
       content: json['content'] as String? ?? '',
-      feedback: FeedbackRatingApi.tryParse(json['feedback'] as String?),
-      createdAt: json['createdAt'] as String?,
+      feedback: FeedbackRatingApi.tryParse(
+        feedback is String ? feedback : null,
+      ),
+      createdAt: createdAt is String ? createdAt : null,
+      metadata: metadata is Map<String, dynamic>
+          ? ChatMessageMetadata.fromJson(metadata)
+          : null,
     );
   }
 
@@ -77,6 +86,75 @@ class ChatMessageDto {
   final String content;
   final FeedbackRating? feedback;
   final String? createdAt;
+
+  /// 저장된 조사 단계·출처. 오래된 메시지나 사용자 메시지에는 없을 수 있다.
+  final ChatMessageMetadata? metadata;
+
+  bool get isAssistant => role == 'assistant';
+}
+
+/// 히스토리 메시지의 metadata 중 화면에 쓰는 부분.
+///
+/// 실시간 이벤트와 같은 내용이 저장되지만 키가 다르다:
+/// `step` → `steps`, `resources` → `resources`, `sources` → `sources`,
+/// `web_sources` → `webSources`. 각 목록은 비어 있으면 키 자체가 없으므로
+/// "없음"(null)과 "빈 목록"을 구분해 둔다.
+/// model·usage·evaluation 같은 진단용 필드는 읽지 않는다.
+class ChatMessageMetadata {
+  const ChatMessageMetadata({
+    this.steps,
+    this.resources,
+    this.notices,
+    this.webSources,
+    this.regeneratedFromMessageId,
+  });
+
+  factory ChatMessageMetadata.fromJson(Map<String, dynamic> json) {
+    final steps = json['steps'];
+    final resources = json['resources'];
+    final regeneratedFrom = json['regeneratedFromMessageId'];
+    return ChatMessageMetadata(
+      steps: steps is List
+          ? [
+              for (final step in steps)
+                if (step is Map<String, dynamic>) ?ResearchStep.tryParse(step),
+            ]
+          : null,
+      resources: resources is List ? parseResources(resources) : null,
+      notices: json['sources'] is List
+          ? parseExternalSources(json['sources'], ChatSourceKind.notice)
+          : null,
+      webSources: json['webSources'] is List
+          ? parseExternalSources(json['webSources'], ChatSourceKind.web)
+          : null,
+      regeneratedFromMessageId:
+          regeneratedFrom is String && regeneratedFrom.isNotEmpty
+          ? regeneratedFrom
+          : null,
+    );
+  }
+
+  /// 조사 단계의 최종 상태 (step 이벤트의 `type` 필드 없이 저장된다)
+  final List<ResearchStep>? steps;
+  final List<RawResource>? resources;
+  final List<ChatSource>? notices;
+  final List<ChatSource>? webSources;
+
+  /// 재생성으로 만들어진 답변이면 원본 assistant 메시지 ID
+  final String? regeneratedFromMessageId;
+
+  /// 출처 목록이 하나라도 저장돼 있는지
+  bool get hasSources =>
+      resources != null || notices != null || webSources != null;
+
+  /// 화면에 쓰는 순서(내부 문서 → 공지 → 웹)로 합친 출처
+  List<ChatSource> resolveSources({String? resourceCenterUrl}) =>
+      combineSources(
+        resources: resources ?? const [],
+        notices: notices ?? const [],
+        webSources: webSources ?? const [],
+        resourceCenterUrl: resourceCenterUrl,
+      );
 }
 
 /// 대화 내역 조회 응답
@@ -84,16 +162,19 @@ class GetMessagesResponse {
   const GetMessagesResponse({required this.messages, this.nextCursor});
 
   factory GetMessagesResponse.fromJson(Map<String, dynamic> json) {
-    final list = json['messages'] as List<dynamic>? ?? [];
-    final messages = list
-        .map((e) => ChatMessageDto.fromJson(e as Map<String, dynamic>))
-        .toList();
+    final list = json['messages'];
+    final nextCursor = json['nextCursor'];
     return GetMessagesResponse(
-      messages: messages,
-      nextCursor: json['nextCursor'] as String?,
+      messages: [
+        if (list is List)
+          for (final item in list)
+            if (item is Map<String, dynamic>) ChatMessageDto.fromJson(item),
+      ],
+      nextCursor: nextCursor is String ? nextCursor : null,
     );
   }
 
+  /// 최신순 (가장 최근 메시지가 맨 앞)
   final List<ChatMessageDto> messages;
   final String? nextCursor;
 }
@@ -239,7 +320,7 @@ List<ChatSource> parseExternalSources(Object? raw, ChatSourceKind kind) {
     final url = item['url'];
     if (url is! String) continue;
     final uri = Uri.tryParse(url);
-    if (uri == null || !uri.hasAuthority) continue;
+    if (uri == null || uri.host.isEmpty) continue;
     if (uri.scheme != 'http' && uri.scheme != 'https') continue;
 
     final title = item['title'];
@@ -254,6 +335,32 @@ List<ChatSource> parseExternalSources(Object? raw, ChatSourceKind kind) {
   }
   return byUrl.values.toList();
 }
+
+/// resources 이벤트(또는 metadata.resources) 항목을 원본 리소스로 변환한다.
+/// 경로(url)가 없는 항목은 열 수 없으므로 버린다.
+List<RawResource> parseResources(Object? raw) {
+  if (raw is! List) return const [];
+  return [
+    for (final item in raw)
+      if (item is Map<String, dynamic>)
+        if (item['url'] case final String url when url.isNotEmpty)
+          RawResource.fromJson(item),
+  ];
+}
+
+/// 세 종류의 출처를 화면 순서(내부 문서 → 공지 → 웹)로 합친다.
+/// 내부 문서만 리소스 센터 경로로 조립하고, 공지·웹은 받은 URL을 그대로 쓴다.
+List<ChatSource> combineSources({
+  List<RawResource> resources = const [],
+  List<ChatSource> notices = const [],
+  List<ChatSource> webSources = const [],
+  String? resourceCenterUrl,
+}) => [
+  for (final resource in resources)
+    resolveSource(resource, resourceCenterUrl: resourceCenterUrl),
+  ...notices,
+  ...webSources,
+];
 
 /// 스트림 완료 후 최종 응답
 class SendChatResponse {
@@ -277,15 +384,20 @@ class RawResource {
   const RawResource({required this.url, this.path, this.formats = const []});
 
   factory RawResource.fromJson(Map<String, dynamic> json) {
+    final url = json['url'];
+    final path = json['path'];
+    final formats = json['formats'];
     return RawResource(
-      url: json['url'] as String? ?? '',
-      path: json['path'] as String?,
-      formats: (json['formats'] as List<dynamic>? ?? [])
-          .map((f) => f.toString().toLowerCase())
-          .toList(),
+      url: url is String ? url : '',
+      path: path is String ? path : null,
+      formats: [
+        if (formats is List)
+          for (final format in formats) format.toString().toLowerCase(),
+      ],
     );
   }
 
+  /// 이미 URL 인코딩된 리소스 경로. 다시 인코딩하지 않는다.
   final String url;
   final String? path;
   final List<String> formats;

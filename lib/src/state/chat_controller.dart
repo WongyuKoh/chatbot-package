@@ -54,8 +54,12 @@ class ChatController extends ChangeNotifier {
   String _loadingMessage = _loadingMessageInitial;
   Timer? _loadingPhaseTimer1;
   Timer? _loadingPhaseTimer2;
+
+  /// 진행 중인 요청의 중지 토큰. 요청마다 새로 만들어 요청 키로도 쓴다:
+  /// 중지된 이전 요청의 늦은 콜백이 새 요청의 상태를 건드리지 않게 구분한다.
   StreamCancelToken? _cancelToken;
   String? _streamingMessageId;
+  bool _disposed = false;
 
   /// 세션 질문 한도 소진(429 + limit) 시 재시도 가능 시각(ms). null이면 경고 없음
   int? _rateLimitRetryAt;
@@ -104,6 +108,21 @@ class ChatController extends ChangeNotifier {
         notifyListeners();
       });
     }
+  }
+
+  /// 닫힌 뒤 도착하는 응답(히스토리 조회 등)이 알림을 보내지 않게 한다
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
+  }
+
+  /// 요청이 끝났을 때 공유 상태를 정리한다. 이미 다른 요청이 시작됐다면 건드리지 않는다.
+  void _endRequest(StreamCancelToken token) {
+    if (!identical(_cancelToken, token)) return;
+    _cancelToken = null;
+    _streamingMessageId = null;
+    _setLoading(false);
   }
 
   int _indexOf(String id) => _messages.indexWhere((m) => m.id == id);
@@ -161,25 +180,112 @@ class ChatController extends ChangeNotifier {
     return response.sessionToken;
   }
 
-  /// 스트림 완료 후 서버 메시지 ID를 로컬 메시지에 연결 (피드백/재생성 API용)
-  Future<void> _attachServerId(
-    String localId, {
+  /// 다른 로컬 답변에 이미 연결된 서버 메시지인지
+  bool _isAttachedElsewhere(String serverId, String localId) =>
+      _messages.any((m) => m.serverId == serverId && m.id != localId);
+
+  /// 저장된 답변의 ID·피드백·metadata(조사 단계, 출처)를 로컬 답변에 반영한다.
+  /// [replaceText]는 스트림이 끊겨 본문을 끝까지 받지 못했을 때만 쓴다.
+  void _adoptStored(
+    String localId,
+    api.ChatMessageDto stored, {
+    bool replaceText = false,
     bool regenerated = false,
+  }) {
+    _updateMessage(localId, (m) {
+      var next = m.copyWith(serverId: stored.id);
+      if (stored.feedback != null) {
+        next = next.copyWith(feedback: stored.feedback);
+      }
+      if (replaceText) next = next.copyWith(text: stored.content);
+      final metadata = stored.metadata;
+      if (metadata != null) {
+        // 저장된 목록이 기준이다. 오래된 메시지처럼 키가 없으면 받은 값을 그대로 둔다
+        if (metadata.hasSources) {
+          next = next.copyWith(
+            sources: metadata.resolveSources(
+              resourceCenterUrl: _config.resourceCenterUrl,
+            ),
+          );
+        }
+        final steps = metadata.steps;
+        if (steps != null) {
+          next = next.copyWith(
+            steps: api.settleRunningSteps(steps, ResearchStepStatus.stopped),
+          );
+        }
+      }
+      if (regenerated) next = next.copyWith(regeneratedAnswer: true);
+      return next;
+    });
+  }
+
+  /// [DONE] 뒤 히스토리를 조회해 저장된 메시지 ID와 metadata를 동기화한다.
+  /// 스트림에는 메시지 ID가 없어서, ID를 얻기 전에는 피드백·재생성을 쓸 수 없다.
+  Future<void> _syncWithHistory(
+    String localId, {
+    String? regeneratedFrom,
   }) async {
     try {
       final latest = await _apiClient.getLatestAssistantMessage();
-      if (latest == null) return;
-      _updateMessage(localId, (m) {
-        var next = m.copyWith(serverId: latest.id);
-        if (latest.feedback != null) {
-          next = next.copyWith(feedback: latest.feedback);
-        }
-        if (regenerated) next = next.copyWith(regeneratedAnswer: true);
-        return next;
-      });
+      if (latest == null || latest.id.isEmpty) return;
+      // 본문 없이 끝난 요청은 저장되지 않아 이전 답변이 최신으로 조회된다.
+      // 그 답변의 ID를 이 답변에 붙이면 피드백이 엉뚱한 메시지로 간다
+      if (latest.id == regeneratedFrom) return;
+      if (_isAttachedElsewhere(latest.id, localId)) return;
+      _adoptStored(localId, latest, regenerated: regeneratedFrom != null);
     } catch (e) {
       // 실패 시 해당 답변의 피드백 버튼만 표시되지 않음 (채팅에는 영향 없음)
-      debugPrint('Failed to attach server message id: $e');
+      debugPrint('Failed to sync the answer with history: $e');
+    }
+  }
+
+  /// HTTP 오류로 거절된 요청이 아니라면(스트림 오류, [DONE] 없는 종료, 연결 끊김)
+  /// 서버가 질문·답변을 이미 저장했을 수 있다.
+  bool _mayBeStored(Object e) =>
+      !(e is ChatApiException && e.statusCode != null);
+
+  /// 실패한 질문의 답변이 서버에 저장돼 있으면 그 답변으로 바꾼다.
+  /// 저장 여부를 단정할 수 없으므로, 재전송(새 질문·횟수 소모) 전에 히스토리를 확인한다.
+  /// 스트림에 메시지 ID가 없어 "맨 끝이 이 질문과 그 답변인가"로만 판단한다.
+  Future<void> _recoverAnswer(String localId, String question) async {
+    try {
+      final messages = (await _apiClient.getMessages(limit: 2)).messages;
+      if (messages.length < 2) return;
+      final answer = messages[0];
+      final asked = messages[1];
+      if (!answer.isAssistant || answer.id.isEmpty) return;
+      if (asked.role != 'user' || asked.content.trim() != question) return;
+      if (_isAttachedElsewhere(answer.id, localId)) return;
+      _adoptStored(localId, answer, replaceText: true);
+    } catch (e) {
+      debugPrint('Failed to check history after a stream failure: $e');
+    }
+  }
+
+  /// 실패한 재생성의 결과가 서버에 저장돼 있으면 그 답변을 보여 준다.
+  /// 재생성 기회는 스트림 시작 전에 선점되므로 같은 요청을 다시 보내지 않고 히스토리만 확인한다.
+  Future<void> _recoverRegeneration({
+    required String originalId,
+    required String regenId,
+    required String originalServerId,
+  }) async {
+    try {
+      final latest = await _apiClient.getLatestAssistantMessage();
+      if (latest == null || latest.id.isEmpty) return;
+      if (latest.metadata?.regeneratedFromMessageId != originalServerId) return;
+      var idx = _indexOf(regenId);
+      if (idx < 0) idx = _indexOf(originalId);
+      if (idx < 0) return;
+      _messages[idx] = ChatMessage(
+        id: regenId,
+        role: MessageRole.assistant,
+        text: latest.content,
+        regeneratedAnswer: true,
+      );
+      _adoptStored(regenId, latest, replaceText: true, regenerated: true);
+    } catch (e) {
+      debugPrint('Failed to check history after a failed regeneration: $e');
     }
   }
 
@@ -203,26 +309,33 @@ class ChatController extends ChangeNotifier {
     _streamingMessageId = assistantId;
     notifyListeners();
 
+    // 세션 발급을 기다리는 동안에도 중지할 수 있도록 토큰을 먼저 만든다
+    final cancelToken = StreamCancelToken();
+    _cancelToken = cancelToken;
+
     // 세션 발급 단계의 400/403/404는 위젯 설정 오류, 그 뒤는 질문 요청의 오류다
     var sessionReady = false;
     try {
       await _ensureSession();
       sessionReady = true;
-
-      final cancelToken = StreamCancelToken();
-      _cancelToken = cancelToken;
+      // 그 사이 중지했다면 질문을 보내지 않는다 (보내면 저장되고 횟수도 쓴다)
+      if (cancelToken.isCancelled) throw StreamCancelledException();
 
       final response = await _apiClient.sendChatMessage(
         api.SendChatRequest(question: trimmed),
         onChunk: (streamedText) {
+          if (cancelToken.isCancelled) return;
           _updateMessage(assistantId, (m) => m.copyWith(text: streamedText));
         },
-        onSteps: (steps) => _applySteps(assistantId, steps),
+        onSteps: (steps) {
+          if (cancelToken.isCancelled) return;
+          _applySteps(assistantId, steps);
+        },
         cancelToken: cancelToken,
       );
+      if (cancelToken.isCancelled) return;
 
-      _cancelToken = null;
-      _streamingMessageId = null;
+      _endRequest(cancelToken);
       _updateMessage(
         assistantId,
         (m) => m.copyWith(
@@ -234,22 +347,22 @@ class ChatController extends ChangeNotifier {
           ),
         ),
       );
-      _setLoading(false);
       notifyListeners();
 
-      await _attachServerId(assistantId);
+      await _syncWithHistory(assistantId);
     } catch (e) {
-      _cancelToken = null;
-      _streamingMessageId = null;
-      _setLoading(false);
-      _settleSteps(
-        assistantId,
-        e is StreamCancelledException
-            ? ResearchStepStatus.stopped
-            : ResearchStepStatus.failed,
-      );
+      // 사용자가 중지한 요청: stopStreaming()이 화면을 이미 정리했고 그 사이
+      // 새 요청이 시작됐을 수 있으므로 여기서는 아무 상태도 건드리지 않는다
+      if (cancelToken.isCancelled) return;
+
+      _endRequest(cancelToken);
+      _settleSteps(assistantId, ResearchStepStatus.failed);
       _handleStreamError(e, assistantId, duringSessionSetup: !sessionReady);
       notifyListeners();
+
+      if (sessionReady && _mayBeStored(e)) {
+        await _recoverAnswer(assistantId, trimmed);
+      }
     }
   }
 
@@ -271,21 +384,24 @@ class ChatController extends ChangeNotifier {
     _setLoading(true, regenerating: true);
     notifyListeners();
 
+    final cancelToken = StreamCancelToken();
+    _cancelToken = cancelToken;
     try {
-      final cancelToken = StreamCancelToken();
-      _cancelToken = cancelToken;
-
       final response = await _apiClient.regenerateAnswer(
         serverId,
         onChunk: (streamedText) {
+          if (cancelToken.isCancelled) return;
           _updateMessage(regenId, (m) => m.copyWith(text: streamedText));
         },
-        onSteps: (steps) => _applySteps(regenId, steps),
+        onSteps: (steps) {
+          if (cancelToken.isCancelled) return;
+          _applySteps(regenId, steps);
+        },
         cancelToken: cancelToken,
       );
+      if (cancelToken.isCancelled) return;
 
-      _cancelToken = null;
-      _streamingMessageId = null;
+      _endRequest(cancelToken);
       _updateMessage(
         regenId,
         (m) => m.copyWith(
@@ -297,22 +413,19 @@ class ChatController extends ChangeNotifier {
           ),
         ),
       );
-      _setLoading(false);
       notifyListeners();
 
-      await _attachServerId(regenId, regenerated: true);
+      // 재생성 답변은 원본을 덮어쓰지 않고 새 메시지로 저장된다
+      await _syncWithHistory(regenId, regeneratedFrom: serverId);
     } catch (e) {
-      _cancelToken = null;
-      _streamingMessageId = null;
-      _setLoading(false);
-      if (e is StreamCancelledException) {
-        _settleSteps(regenId, ResearchStepStatus.stopped);
-        notifyListeners();
-        return;
-      }
+      // 사용자가 중지한 요청은 stopStreaming()이 이미 정리했다
+      if (cancelToken.isCancelled) return;
+
+      _endRequest(cancelToken);
       _settleSteps(regenId, ResearchStepStatus.failed);
       debugPrint('Failed to regenerate answer: $e');
-      if (e is ChatApiException && e.statusCode == 401) _dropSession();
+      final sessionExpired = e is ChatApiException && e.statusCode == 401;
+      if (sessionExpired) _dropSession();
       // 이미 받은 텍스트가 있으면 미완료로 표시해 유지, 없으면 원본 답변 복원.
       // 서버는 재생성 기회를 스트림 시작 전에 선점하고 실패해도 돌려주지 않을 수 있으므로
       // 복원한 원본에서 같은 재생성을 다시 시도하지 않게 막는다.
@@ -324,6 +437,15 @@ class ChatController extends ChangeNotifier {
             : partial.copyWith(text: _markIncomplete(partial.text));
       }
       notifyListeners();
+
+      // 자동으로 다시 요청하지 않고, 저장된 결과가 있는지 히스토리만 확인한다
+      if (!sessionExpired) {
+        await _recoverRegeneration(
+          originalId: originalMsg.id,
+          regenId: regenId,
+          originalServerId: serverId,
+        );
+      }
     }
   }
 
@@ -360,7 +482,9 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  /// 스트리밍 중지: 받은 텍스트는 유지하고 중지 안내를 덧붙인다 (웹과 동일)
+  /// 스트리밍 중지: 받은 텍스트는 유지하고 중지 안내를 덧붙인다 (웹과 동일).
+  /// 요청을 abort하며, 그 뒤 도착하는 이벤트는 이 답변에 적용하지 않는다.
+  /// 서버가 이미 저장한 질문·횟수는 되돌려지지 않는다.
   void stopStreaming() {
     final msgId = _streamingMessageId;
     _setLoading(false);
@@ -500,6 +624,7 @@ class ChatController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _loadingPhaseTimer1?.cancel();
     _loadingPhaseTimer2?.cancel();
     _cancelToken?.cancel();

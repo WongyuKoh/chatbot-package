@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -212,12 +213,57 @@ void main() {
     });
 
     test('error event fails the stream after steps', () async {
-      expect(
-        () => send([
+      await expectLater(
+        send([
           '{"type":"step","id":"research","kind":"research","label":"찾는 중","status":"running"}',
           '{"error":"답변 생성 중 오류가 발생했습니다."}',
         ]),
-        throwsA(isA<ChatApiException>()),
+        throwsA(
+          isA<ChatStreamErrorException>()
+              .having((e) => e.statusCode, 'statusCode', isNull)
+              .having((e) => e.message, 'message', '답변 생성 중 오류가 발생했습니다.'),
+        ),
+      );
+    });
+
+    test('nothing after an error event is applied', () async {
+      final chunks = <String>[];
+      await expectLater(
+        streamClient([
+          '{"content":"받다 만 "}',
+          '{"error":"Failed to save message"}',
+          '{"content":"늦은 조각"}',
+          '[DONE]',
+        ]).sendChatMessage(
+          const SendChatRequest(question: 'q'),
+          onChunk: chunks.add,
+        ),
+        throwsA(isA<ChatStreamErrorException>()),
+      );
+      expect(chunks, ['받다 만 ']);
+    });
+
+    test('each source event replaces the list of its own kind', () async {
+      final response = await send([
+        '{"type":"web_sources","sources":[{"kind":"web","id":"a","title":"a.example.com","url":"https://a.example.com/"}]}',
+        '{"type":"web_sources","sources":[{"kind":"web","id":"b","title":"b.example.com","url":"https://b.example.com/"}]}',
+        '[DONE]',
+      ]);
+
+      expect(response.sources.map((s) => s.url), ['https://b.example.com/']);
+    });
+
+    test('an encoded resource path is not encoded again', () async {
+      final response = await send([
+        '{"type":"resources","resources":[{"path":"학사 안내.pdf","formats":["pdf"],"url":"%ED%95%99%EC%82%AC%20%EC%95%88%EB%82%B4.pdf"},{"path":"no-url.pdf","formats":["pdf"]}]}',
+        '[DONE]',
+      ]);
+
+      expect(response.sources, hasLength(1));
+      expect(response.sources.single.title, '학사 안내.pdf');
+      expect(
+        response.sources.single.url,
+        'https://rc.example.com/resource/%ED%95%99%EC%82%AC%20%EC%95%88%EB%82%B4.pdf',
       );
     });
   });
@@ -263,6 +309,33 @@ void main() {
         rawClient('data:{"content":"안녕"}\r\n\r\ndata: [DONE]\r\n\r\n'),
       );
       expect(response.answer, '안녕');
+    });
+
+    test('frames survive arbitrary network chunk boundaries', () async {
+      final bytes = utf8.encode(
+        'data: {"type":"step","id":"research","kind":"research","label":"자료를 찾고 있어요","status":"done"}\n\n'
+        'data: {"content":"장학금 [공지 원문](https://ziggle.gistory.me/notice/42)을 "}\n\n'
+        'data: {"content":"참고해 주세요."}\n\n'
+        'data: [DONE]\n\n',
+      );
+      // 한글 한 글자(3바이트)·JSON·Markdown 링크가 모두 중간에서 잘리도록 2바이트씩 보낸다
+      final client = ChatApiClient(
+        baseUrl: 'https://api.example.com',
+        client: _StreamClient(
+          (_) => Stream.fromIterable([
+            for (var i = 0; i < bytes.length; i += 2)
+              bytes.sublist(i, i + 2 > bytes.length ? bytes.length : i + 2),
+          ]),
+        ),
+      );
+
+      final response = await send(client);
+
+      expect(
+        response.answer,
+        '장학금 [공지 원문](https://ziggle.gistory.me/notice/42)을 참고해 주세요.',
+      );
+      expect(response.steps.single.label, '자료를 찾고 있어요');
     });
 
     test('a malformed frame is a protocol error', () async {
@@ -329,6 +402,197 @@ void main() {
     });
   });
 
+  group('ChatApiClient cancellation', () {
+    test(
+      'stopping while waiting for the response aborts the request',
+      () async {
+        final sent = Completer<http.BaseRequest>();
+        final client = ChatApiClient(
+          baseUrl: 'https://api.example.com',
+          // 첫 이벤트가 늦는 상황: 응답 헤더가 끝내 오지 않는다
+          client: _StreamClient.pending(sent.complete),
+        );
+        final token = StreamCancelToken();
+
+        final result = client.sendChatMessage(
+          const SendChatRequest(question: 'q'),
+          cancelToken: token,
+        );
+        final request = await sent.future;
+        expect(request, isA<http.Abortable>());
+
+        token.cancel();
+
+        await expectLater(result, throwsA(isA<StreamCancelledException>()));
+        // 실제 HTTP 클라이언트가 연결을 끊을 수 있도록 abort 신호가 요청에 실려 있다
+        await expectLater((request as http.Abortable).abortTrigger, completes);
+      },
+    );
+
+    test('a token cancelled before sending never sends', () async {
+      var requests = 0;
+      final client = ChatApiClient(
+        baseUrl: 'https://api.example.com',
+        client: _StreamClient((_) {
+          requests++;
+          return const Stream.empty();
+        }),
+      );
+      final token = StreamCancelToken()..cancel();
+
+      await expectLater(
+        client.sendChatMessage(
+          const SendChatRequest(question: 'q'),
+          cancelToken: token,
+        ),
+        throwsA(isA<StreamCancelledException>()),
+      );
+      expect(requests, 0);
+    });
+
+    test('events after stopping are not applied', () async {
+      final body = StreamController<List<int>>();
+      final client = ChatApiClient(
+        baseUrl: 'https://api.example.com',
+        client: _StreamClient((_) => body.stream),
+      );
+      final token = StreamCancelToken();
+      final chunks = <String>[];
+
+      final result = client.sendChatMessage(
+        const SendChatRequest(question: 'q'),
+        onChunk: chunks.add,
+        cancelToken: token,
+      );
+      body.add(utf8.encode('data: {"content":"받은 본문"}\n\n'));
+      await pumpEventQueue();
+      expect(chunks, ['받은 본문']);
+
+      token.cancel();
+      await expectLater(result, throwsA(isA<StreamCancelledException>()));
+
+      // 구독이 끊겨 뒤따르는 이벤트는 전달되지 않는다
+      expect(body.hasListener, isFalse);
+      expect(chunks, ['받은 본문']);
+    });
+  });
+
+  group('history', () {
+    test('metadata restores steps and all three source kinds', () async {
+      Uri? requested;
+      final client = ChatApiClient(
+        baseUrl: 'https://api.example.com',
+        sessionToken: 'tok',
+        client: _MockClient((request) async {
+          requested = request.url;
+          return http.Response.bytes(
+            utf8.encode(
+              jsonEncode({
+                'messages': [
+                  {
+                    'id': 'a-1',
+                    'role': 'assistant',
+                    'content': '저장된 답변 본문',
+                    'metadata': {
+                      'steps': [
+                        {
+                          'id': 'research',
+                          'kind': 'research',
+                          'label': '자료 2개를 모았어요',
+                          'status': 'done',
+                          'resultCount': 2,
+                        },
+                      ],
+                      'resources': [
+                        {
+                          'path': 'guide.pdf',
+                          'formats': ['pdf'],
+                          'url': 'guide.pdf',
+                        },
+                      ],
+                      'sources': [
+                        {
+                          'kind': 'notice',
+                          'id': '42',
+                          'title': '장학금 신청 안내',
+                          'url': 'https://ziggle.gistory.me/notice/42',
+                          'opened': true,
+                        },
+                      ],
+                      'webSources': [
+                        {
+                          'kind': 'web',
+                          'id': 'w',
+                          'title': 'www.gist.ac.kr',
+                          'url': 'https://www.gist.ac.kr/example',
+                          'official': true,
+                        },
+                      ],
+                      'regeneratedFromMessageId': 'a-0',
+                      'model': 'some-model',
+                      'evaluation': {'outcome': 'answered'},
+                    },
+                    'feedback': 'BAD',
+                    'createdAt': '2026-11-03T00:00:00.000Z',
+                  },
+                  {'id': 'u-1', 'role': 'user', 'content': '질문'},
+                ],
+                'nextCursor': null,
+              }),
+            ),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+
+      final history = await client.getMessages(limit: 2);
+
+      expect(requested!.path, '/v1/widget/messages');
+      expect(requested!.queryParameters, {'limit': '2'});
+
+      final answer = history.messages.first;
+      expect(answer.isAssistant, isTrue);
+      expect(answer.feedback, FeedbackRating.bad);
+      final metadata = answer.metadata!;
+      expect(metadata.steps!.single.status, ResearchStepStatus.done);
+      expect(metadata.steps!.single.resultCount, 2);
+      expect(metadata.regeneratedFromMessageId, 'a-0');
+
+      final sources = metadata.resolveSources(
+        resourceCenterUrl: 'https://rc.example.com',
+      );
+      expect(sources.map((s) => s.kind), [
+        ChatSourceKind.document,
+        ChatSourceKind.notice,
+        ChatSourceKind.web,
+      ]);
+      expect(sources[0].url, 'https://rc.example.com/resource/guide.pdf');
+      expect(sources[1].url, 'https://ziggle.gistory.me/notice/42');
+      expect(sources[2].official, isTrue);
+
+      // 사용자 메시지처럼 metadata가 없어도 본문은 읽힌다
+      expect(history.messages[1].metadata, isNull);
+      expect(history.messages[1].content, '질문');
+    });
+
+    test('missing metadata lists stay distinguishable from empty ones', () {
+      final dto = ChatMessageDto.fromJson({
+        'id': 'a-1',
+        'role': 'assistant',
+        'content': '본문',
+        'metadata': {'model': 'm', 'webSources': <Object>[]},
+      });
+
+      expect(dto.metadata!.steps, isNull);
+      expect(dto.metadata!.resources, isNull);
+      expect(dto.metadata!.notices, isNull);
+      expect(dto.metadata!.webSources, isEmpty);
+      expect(dto.metadata!.hasSources, isTrue);
+      expect(dto.metadata!.resolveSources(), isEmpty);
+    });
+  });
+
   group('step helpers', () {
     const running = ResearchStep(
       id: 'a',
@@ -381,6 +645,33 @@ class _MockClient extends http.BaseClient {
       Stream.value(response.bodyBytes),
       response.statusCode,
       headers: response.headers,
+    );
+  }
+}
+
+/// 응답 본문을 조각 단위 스트림으로 직접 주는 클라이언트
+class _StreamClient extends http.BaseClient {
+  _StreamClient(Stream<List<int>> Function(http.BaseRequest) body)
+    : _body = body,
+      _onSend = null;
+
+  /// 응답 헤더가 오지 않는 클라이언트 (abort를 지원하지 않는 클라이언트처럼 동작)
+  _StreamClient.pending(void Function(http.BaseRequest) onSend)
+    : _body = null,
+      _onSend = onSend;
+
+  final Stream<List<int>> Function(http.BaseRequest)? _body;
+  final void Function(http.BaseRequest)? _onSend;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final body = _body;
+    if (body == null) {
+      _onSend!(request);
+      return Completer<http.StreamedResponse>().future;
+    }
+    return Future.value(
+      http.StreamedResponse(body(request), 200, headers: _sse),
     );
   }
 }

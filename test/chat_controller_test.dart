@@ -16,12 +16,25 @@ class _FakeApiClient extends Fake implements ChatApiClient {
   List<ResearchStep> _steps = const [];
   String? regeneratedServerId;
 
+  /// 보낸 질문 (재생성은 포함하지 않는다)
+  final questions = <String>[];
+
+  /// 가장 최근 요청의 중지 토큰
+  StreamCancelToken? cancelToken;
+
+  /// 서버에 저장된 히스토리 (최신순)
+  List<ChatMessageDto> history = const [
+    ChatMessageDto(id: 'server-1', role: 'assistant', content: ''),
+  ];
+
   Future<SendChatResponse> _start(
     void Function(String text)? onChunk,
     void Function(List<ResearchStep> steps)? onSteps,
+    StreamCancelToken? token,
   ) {
     _onChunk = onChunk;
     _onSteps = onSteps;
+    cancelToken = token;
     _steps = const [];
     _response = Completer();
     return _response!.future;
@@ -36,7 +49,10 @@ class _FakeApiClient extends Fake implements ChatApiClient {
     void Function(String text)? onChunk,
     void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
-  }) => _start(onChunk, onSteps);
+  }) {
+    questions.add(request.question);
+    return _start(onChunk, onSteps, cancelToken);
+  }
 
   @override
   Future<SendChatResponse> regenerateAnswer(
@@ -46,12 +62,20 @@ class _FakeApiClient extends Fake implements ChatApiClient {
     StreamCancelToken? cancelToken,
   }) {
     regeneratedServerId = messageId;
-    return _start(onChunk, onSteps);
+    return _start(onChunk, onSteps, cancelToken);
   }
 
   @override
-  Future<ChatMessageDto?> getLatestAssistantMessage() async =>
-      const ChatMessageDto(id: 'server-1', role: 'assistant', content: '');
+  Future<GetMessagesResponse> getMessages({
+    String? cursor,
+    int limit = 20,
+  }) async => GetMessagesResponse(messages: history.take(limit).toList());
+
+  @override
+  Future<ChatMessageDto?> getLatestAssistantMessage() async {
+    final latest = history.isEmpty ? null : history.first;
+    return latest != null && latest.isAssistant ? latest : null;
+  }
 
   @override
   Future<void> submitFeedback(String messageId, FeedbackRating rating) async {}
@@ -72,17 +96,28 @@ class _FakeApiClient extends Fake implements ChatApiClient {
     _onSteps!(_steps);
   }
 
-  void finish(String answer) =>
-      _response!.complete(SendChatResponse(answer: answer, steps: _steps));
+  void finish(String answer, {List<ChatSource> sources = const []}) =>
+      _response!.complete(
+        SendChatResponse(answer: answer, sources: sources, steps: _steps),
+      );
 
   void fail(Object error) => _response!.completeError(error);
+
+  /// 진행 중인 요청의 응답. 다음 요청이 시작된 뒤에도 이 요청을 끝낼 수 있다.
+  Completer<SendChatResponse> get pending => _response!;
 }
 
 class _FakeSessionManager extends Fake implements SessionManager {
   bool cleared = false;
 
+  /// 설정하면 세션 확인이 이 시점까지 끝나지 않는다
+  Completer<void>? gate;
+
   @override
-  Future<String?> loadSession() async => 'session-token';
+  Future<String?> loadSession() async {
+    await gate?.future;
+    return 'session-token';
+  }
 
   @override
   Future<int?> expiresAt() async => 1900000000000;
@@ -378,5 +413,282 @@ void main() {
         expect(session.cleared, isTrue);
       },
     );
+  });
+
+  group('ChatController stopping', () {
+    test('stopping aborts the request', () async {
+      await ask('질문');
+      api.chunk('받은 본문');
+
+      controller.stopStreaming();
+
+      expect(api.cancelToken!.isCancelled, isTrue);
+      expect(controller.loading, isFalse);
+      expect(answer().text, '받은 본문\n\n_(응답이 중지되었습니다)_');
+    });
+
+    test('late events from a stopped request are ignored', () async {
+      await ask('질문');
+      api.chunk('받은 본문');
+      controller.stopStreaming();
+      final stopped = answer().text;
+
+      // abort를 지원하지 않는 클라이언트라면 이벤트가 더 올 수 있다
+      api.chunk('받은 본문 그리고 늦게 온 조각');
+      api.step('research', '늦게 온 단계', ResearchStepStatus.running);
+      api.finish('늦게 완성된 답변');
+      await sent;
+
+      expect(answer().text, stopped);
+      expect(answer().steps, isEmpty);
+      expect(answer().serverId, isNull);
+    });
+
+    test('a stopped request does not disturb the next one', () async {
+      await ask('첫 질문');
+      final first = api.pending;
+      controller.stopStreaming();
+
+      final firstSent = sent;
+      await ask('두 번째 질문');
+      expect(controller.loading, isTrue);
+
+      // 이전 요청이 뒤늦게 끝나도 새 요청의 로딩·스트리밍 상태는 그대로다
+      first.completeError(StreamCancelledException());
+      await firstSent;
+      expect(controller.loading, isTrue);
+
+      api.chunk('두 번째 답변');
+      expect(answer().text, '두 번째 답변');
+      api.finish('두 번째 답변');
+      await sent;
+      expect(controller.loading, isFalse);
+    });
+
+    test(
+      'stopping before the session is ready never sends the question',
+      () async {
+        session.gate = Completer();
+        sent = controller.sendMessage('질문');
+        await pumpEventQueue();
+
+        controller.stopStreaming();
+        session.gate!.complete();
+        await sent;
+
+        expect(api.questions, isEmpty);
+        expect(controller.loading, isFalse);
+        expect(answer().text, '응답이 중지되었습니다.');
+      },
+    );
+
+    test('nothing is notified after dispose', () async {
+      final local = ChatController(
+        config: _config,
+        apiClient: api,
+        sessionManager: session,
+      );
+      var notified = 0;
+      local.addListener(() => notified++);
+      final pending = local.sendMessage('질문');
+      await pumpEventQueue();
+      final before = notified;
+
+      local.dispose();
+      expect(api.cancelToken!.isCancelled, isTrue);
+      api.fail(StreamCancelledException());
+      await pending;
+
+      expect(notified, before);
+    });
+  });
+
+  group('ChatController history sync', () {
+    const notice = ChatSource(
+      type: 'url',
+      url: 'https://ziggle.gistory.me/notice/42',
+      title: '장학금 신청 안내',
+      kind: ChatSourceKind.notice,
+    );
+
+    ChatMessageDto stored(
+      String id,
+      String content, {
+      Map<String, dynamic>? metadata,
+      FeedbackRating? feedback,
+    }) => ChatMessageDto(
+      id: id,
+      role: 'assistant',
+      content: content,
+      feedback: feedback,
+      metadata: metadata == null
+          ? null
+          : ChatMessageMetadata.fromJson(metadata),
+    );
+
+    ChatMessageDto asked(String content) => ChatMessageDto(
+      id: 'u-${content.hashCode}',
+      role: 'user',
+      content: content,
+    );
+
+    test('after [DONE] the stored id and metadata are attached', () async {
+      await ask('질문');
+      api.history = [
+        stored(
+          'a-1',
+          '답변',
+          metadata: {
+            'steps': [
+              {
+                'id': 'research',
+                'kind': 'research',
+                'label': '자료 1개를 모았어요',
+                'status': 'done',
+                'resultCount': 1,
+              },
+            ],
+            'webSources': [
+              {
+                'kind': 'web',
+                'id': 'w',
+                'title': 'www.gist.ac.kr',
+                'url': 'https://www.gist.ac.kr/example',
+                'official': true,
+              },
+            ],
+          },
+        ),
+        asked('질문'),
+      ];
+      api.finish('답변');
+      await sent;
+
+      expect(answer().serverId, 'a-1');
+      expect(answer().steps.single.label, '자료 1개를 모았어요');
+      expect(answer().sources.single.kind, ChatSourceKind.web);
+      expect(answer().sources.single.official, isTrue);
+    });
+
+    test('a stored message without metadata keeps what was streamed', () async {
+      await ask('질문');
+      api.step('research', '조사 완료', ResearchStepStatus.done);
+      api.history = [stored('a-1', '답변'), asked('질문')];
+      api.finish('답변', sources: const [notice]);
+      await sent;
+
+      expect(answer().serverId, 'a-1');
+      expect(answer().sources.single.url, notice.url);
+      expect(answer().steps.single.label, '조사 완료');
+    });
+
+    test(
+      'an answer already attached elsewhere is not attached again',
+      () async {
+        await ask('첫 질문');
+        api.history = [stored('a-1', '첫 답변'), asked('첫 질문')];
+        api.finish('첫 답변');
+        await sent;
+
+        // 본문 없이 끝난 요청은 저장되지 않아 이전 답변이 그대로 최신이다
+        await ask('두 번째 질문');
+        api.finish('');
+        await sent;
+
+        expect(answer().serverId, isNull);
+        expect(
+          controller.messages.where((m) => m.serverId == 'a-1'),
+          hasLength(1),
+        );
+      },
+    );
+
+    test(
+      'a failed stream is replaced by the answer the server saved',
+      () async {
+        await ask('장학금 알려줘');
+        api.step('research', '찾는 중', ResearchStepStatus.running);
+        api.chunk('받다 만 ');
+        api.history = [
+          stored(
+            'a-1',
+            '저장된 완성 답변',
+            metadata: {
+              'sources': [
+                {
+                  'kind': 'notice',
+                  'id': '42',
+                  'title': notice.title,
+                  'url': notice.url,
+                },
+              ],
+            },
+          ),
+          asked('장학금 알려줘'),
+        ];
+        api.fail(ChatStreamErrorException('Failed to save message'));
+        await sent;
+
+        expect(answer().text, '저장된 완성 답변');
+        expect(answer().serverId, 'a-1');
+        expect(answer().sources.single.kind, ChatSourceKind.notice);
+        expect(api.questions, ['장학금 알려줘']);
+      },
+    );
+
+    test('a failed stream stays incomplete when nothing was saved', () async {
+      await ask('두 번째 질문');
+      api.chunk('받다 만 답변');
+      // 맨 끝이 이전 질문의 답변이다: 이번 질문은 저장되지 않았다
+      api.history = [stored('a-0', '이전 답변'), asked('이전 질문')];
+      api.fail(ChatStreamIncompleteException());
+      await sent;
+
+      expect(answer().text, endsWith('_(응답이 끝까지 전달되지 않았습니다)_'));
+      expect(answer().serverId, isNull);
+      // 자동으로 다시 보내지 않는다
+      expect(api.questions, ['두 번째 질문']);
+    });
+
+    test('a rejected request does not look at history', () async {
+      await ask('질문');
+      api.history = [stored('a-9', '다른 답변'), asked('질문')];
+      api.fail(ChatApiException('요청이 많습니다.', statusCode: 429));
+      await sent;
+
+      expect(answer().text, '지금은 요청이 많습니다. 잠시 후 다시 시도해주세요.');
+      expect(answer().serverId, isNull);
+    });
+
+    test('a failed regeneration shows the result the server saved', () async {
+      await ask('질문');
+      api.history = [stored('a-1', '처음 답변'), asked('질문')];
+      api.finish('처음 답변');
+      await sent;
+
+      final regenerated = controller.submitFeedback(
+        answer(),
+        FeedbackRating.bad,
+      );
+      await pumpEventQueue();
+      api.history = [
+        stored(
+          'a-2',
+          '다시 만든 답변',
+          metadata: {
+            'regeneratedFromMessageId': 'a-1',
+            'regeneratedFromFeedback': 'BAD',
+          },
+        ),
+        ...api.history,
+      ];
+      api.fail(ChatStreamIncompleteException());
+      await regenerated;
+
+      expect(answer().text, '다시 만든 답변');
+      expect(answer().serverId, 'a-2');
+      expect(answer().regeneratedAnswer, isTrue);
+      expect(controller.messages.where((m) => m.text == '처음 답변'), isEmpty);
+    });
   });
 }
