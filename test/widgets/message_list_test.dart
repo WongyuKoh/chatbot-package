@@ -8,6 +8,8 @@ import 'package:gist_chatbot_flutter/src/config/gist_chatbot_config.dart';
 import 'package:gist_chatbot_flutter/src/session/session_manager.dart';
 import 'package:gist_chatbot_flutter/src/state/chat_controller.dart';
 import 'package:gist_chatbot_flutter/src/widgets/chat_screen.dart';
+import 'package:gist_chatbot_flutter/src/widgets/scroll_to_bottom_button.dart';
+import 'package:gist_chatbot_flutter/src/widgets/thinking_dots.dart';
 
 /// 스트리밍 청크와 완료 시점을 테스트에서 직접 흘려보내는 API 클라이언트
 class _FakeApiClient extends Fake implements ChatApiClient {
@@ -89,10 +91,18 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  /// 생성 중 버튼의 점 애니메이션은 계속 돌아서 pumpAndSettle이 끝나지 않으므로,
+  /// 스크롤 애니메이션이 끝날 만큼만 프레임을 돌린다.
+  Future<void> pumpFrames(WidgetTester tester) async {
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+  }
+
   /// 위로 스크롤 (손가락을 아래로 끌기)
   Future<void> scrollUp(WidgetTester tester) async {
     await tester.drag(find.byType(ListView), const Offset(0, 400));
-    await tester.pumpAndSettle();
+    await pumpFrames(tester);
   }
 
   ScrollPosition listPosition(WidgetTester tester) =>
@@ -112,7 +122,7 @@ void main() {
 
       await scrollUp(tester);
       expect(find.byTooltip(_tooltip), findsOneWidget);
-      expect(find.text(_generatingLabel), findsNothing);
+      expect(find.bySemanticsLabel(_generatingLabel), findsNothing);
 
       await tester.tap(find.byTooltip(_tooltip));
       await tester.pumpAndSettle();
@@ -128,21 +138,73 @@ void main() {
       await askAndStream(tester);
 
       await scrollUp(tester);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       // 위에서 읽는 동안 답변이 길어져도 화면을 끌어내리지 않음
       final position = listPosition(tester);
       final pixels = position.pixels;
       api.chunk(_longAnswer(60));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(position.pixels, pixels);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       // 답변이 끝나면 평소의 원형 버튼으로 돌아감
       api.finish(_longAnswer(60));
       await tester.pumpAndSettle();
-      expect(find.text(_generatingLabel), findsNothing);
+      expect(find.bySemanticsLabel(_generatingLabel), findsNothing);
       expect(find.byTooltip(_tooltip), findsOneWidget);
+    });
+
+    testWidgets(
+      'keeps the same 32px circle while generating and only swaps the arrow for dots',
+      (tester) async {
+        final inButton = find.byType(ScrollToBottomButton);
+        // 버튼 안의 가장 바깥 Container가 눈에 보이는 원이다
+        final face = find
+            .descendant(of: inButton, matching: find.byType(Container))
+            .first;
+        final dots = find.descendant(
+          of: inButton,
+          matching: find.byType(ThinkingDots),
+        );
+        final arrow = find.descendant(
+          of: inButton,
+          matching: find.byIcon(Icons.arrow_downward_rounded),
+        );
+
+        await pumpChat(tester);
+        await askAndStream(tester);
+        await scrollUp(tester);
+
+        // 생성 중: 웹 위젯과 같은 32px 원 안에 4px 점 3개(간격 3px)
+        expect(tester.getSize(face), const Size(32, 32));
+        expect(arrow, findsNothing);
+        expect(tester.getSize(dots), const Size(4 * 3 + 3 * 2, 4));
+        final generatingFace = tester.element(face);
+
+        // 답변이 끝나면 버튼은 그대로 두고 안의 내용만 화살표로 바뀐다
+        api.finish(_longAnswer(40));
+        await tester.pumpAndSettle();
+        expect(tester.getSize(face), const Size(32, 32));
+        expect(dots, findsNothing);
+        expect(arrow, findsOneWidget);
+        expect(tester.element(face), same(generatingFace));
+      },
+    );
+
+    testWidgets('the loading bubble keeps its 6px dots', (tester) async {
+      await pumpChat(tester);
+      unawaited(controller.sendMessage('질문'));
+      await tester.pump();
+
+      // 답변이 오기 전 로딩 말풍선의 점은 버튼과 달리 기본 크기(6px, 간격 6px)다
+      expect(
+        tester.getSize(find.byType(ThinkingDots)),
+        const Size(6 * 3 + 6 * 2, 6),
+      );
+
+      api.finish('답변');
+      await tester.pumpAndSettle();
     });
 
     testWidgets('stays hidden while following a streaming answer', (
@@ -256,7 +318,7 @@ void main() {
       );
       expect(codeScroll, findsOneWidget);
       await tester.drag(codeScroll, const Offset(-200, 0));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       final codePosition = tester
           .state<ScrollableState>(
             find.descendant(of: codeScroll, matching: find.byType(Scrollable)),
@@ -267,9 +329,9 @@ void main() {
       // 코드 블록을 보는 동안 답변이 길어져도 화면을 끌어내리지 않음
       final pixels = position.pixels;
       api.chunk('$withCode\n\n${_longAnswer(20)}');
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(position.pixels, pixels);
-      expect(find.text(_generatingLabel), findsOneWidget);
+      expect(find.bySemanticsLabel(_generatingLabel), findsOneWidget);
 
       api.finish('$withCode\n\n${_longAnswer(20)}');
       await tester.pumpAndSettle();
