@@ -195,6 +195,47 @@ void main() {
       expect(find.text('Ziggle 공지 3개를 불러왔어요'), findsNothing);
     });
 
+    testWidgets('a stop or incomplete notice renders as italics, not markers', (
+      tester,
+    ) async {
+      // 상위 span의 스타일을 물려받은 결과로 기울임 여부를 본다
+      bool hasItalic(InlineSpan span, String text, [TextStyle? inherited]) {
+        if (span is! TextSpan) return false;
+        final style = inherited?.merge(span.style) ?? span.style;
+        if ((span.text ?? '').contains(text) &&
+            style?.fontStyle == FontStyle.italic) {
+          return true;
+        }
+        return (span.children ?? const <InlineSpan>[]).any(
+          (child) => hasItalic(child, text, style),
+        );
+      }
+
+      // 컨트롤러가 본문 뒤에 붙이는 형식 그대로
+      for (final notice in ['응답이 중지되었습니다', '응답이 끝까지 전달되지 않았습니다']) {
+        await pumpBubble(
+          tester,
+          steps: const [],
+          text: '- **신청 기간**: 공지 참고\n\n*($notice)*',
+        );
+
+        final rendered = tester
+            .widgetList<RichText>(find.byType(RichText))
+            .map((r) => r.text)
+            .toList();
+        // 기울임 표지(*, _)가 글자로 남지 않는다
+        expect(
+          rendered.map((span) => span.toPlainText()).join('\n'),
+          isNot(anyOf(contains('*'), contains('_'))),
+        );
+        expect(
+          rendered.any((span) => hasItalic(span, notice)),
+          isTrue,
+          reason: '"$notice" 안내가 기울임으로 보여야 한다',
+        );
+      }
+    });
+
     testWidgets('summarises stopped and failed research in its own words', (
       tester,
     ) async {

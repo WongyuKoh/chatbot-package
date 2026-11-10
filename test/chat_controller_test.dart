@@ -268,7 +268,7 @@ void main() {
 
       expect(controller.loading, isFalse);
       // 받은 본문은 남기되 완성된 답변처럼 보이지 않게 한다
-      expect(answer().text, '받다 만 답변\n\n_(응답이 끝까지 전달되지 않았습니다)_');
+      expect(answer().text, '받다 만 답변\n\n*(응답이 끝까지 전달되지 않았습니다)*');
       expect(answer().steps.single.status, ResearchStepStatus.failed);
     });
 
@@ -397,7 +397,7 @@ void main() {
       await sent;
 
       expect(controller.loading, isFalse);
-      expect(answer().text, endsWith('_(응답이 끝까지 전달되지 않았습니다)_'));
+      expect(answer().text, endsWith('*(응답이 끝까지 전달되지 않았습니다)*'));
       // 저장 여부를 알 수 없으므로 피드백 대상으로 연결하지 않는다
       expect(answer().serverId, isNull);
     });
@@ -424,7 +424,7 @@ void main() {
 
       expect(api.cancelToken!.isCancelled, isTrue);
       expect(controller.loading, isFalse);
-      expect(answer().text, '받은 본문\n\n_(응답이 중지되었습니다)_');
+      expect(answer().text, '받은 본문\n\n*(응답이 중지되었습니다)*');
     });
 
     test('late events from a stopped request are ignored', () async {
@@ -644,7 +644,7 @@ void main() {
       api.fail(ChatStreamIncompleteException());
       await sent;
 
-      expect(answer().text, endsWith('_(응답이 끝까지 전달되지 않았습니다)_'));
+      expect(answer().text, endsWith('*(응답이 끝까지 전달되지 않았습니다)*'));
       expect(answer().serverId, isNull);
       // 자동으로 다시 보내지 않는다
       expect(api.questions, ['두 번째 질문']);

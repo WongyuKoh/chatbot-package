@@ -16,6 +16,11 @@ const _loadingMessageReading = '파일을 읽어보는 중';
 const _loadingMessageThinking = '조금 더 생각 중';
 const _loadingMessageRegenerating = '답변을 다시 생성하는 중';
 
+/// 받은 본문 뒤에 상태 안내(중지·미완료)를 기울임 문단으로 덧붙인다.
+/// 기울임은 `*…*`로 쓴다. gpt_markdown은 1.3.3부터 `_…_`도 기울임으로 처리하지만
+/// 이 패키지가 허용하는 그 이전 버전(1.1.8~)에서는 밑줄 문자가 그대로 보인다.
+String _withNotice(String text, String notice) => '$text\n\n*($notice)*';
+
 int _uidSeq = 0;
 
 String _uid() =>
@@ -491,7 +496,7 @@ class ChatController extends ChangeNotifier {
     if (msgId != null) {
       _updateMessage(msgId, (m) {
         final text = m.text.trim().isNotEmpty
-            ? '${m.text}\n\n_(응답이 중지되었습니다)_'
+            ? _withNotice(m.text, '응답이 중지되었습니다')
             : '응답이 중지되었습니다.';
         return m.copyWith(
           text: text,
@@ -512,7 +517,8 @@ class ChatController extends ChangeNotifier {
   }
 
   /// 끝까지 받지 못한 본문에 붙이는 안내 (중지 안내와 같은 형식)
-  String _markIncomplete(String text) => '$text\n\n_(응답이 끝까지 전달되지 않았습니다)_';
+  String _markIncomplete(String text) =>
+      _withNotice(text, '응답이 끝까지 전달되지 않았습니다');
 
   void _handleStreamError(
     Object e,
