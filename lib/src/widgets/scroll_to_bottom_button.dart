@@ -5,7 +5,7 @@ import 'pressable.dart';
 import 'thinking_dots.dart';
 
 /// 맨 아래로 버튼: 사용자가 위로 스크롤해 하단 따라가기가 꺼졌을 때 메시지 영역 하단 가운데에 표시.
-/// 평소엔 ↓ 원형, 답변 생성 중엔 화살표 없이 점 3개(…)만 깜빡이는 pill로 바뀐다.
+/// 평소엔 ↓ 원형이고, 답변 생성 중엔 같은 원 안에서 화살표 대신 점 3개(…)가 깜빡인다 (웹 위젯과 동일).
 class ScrollToBottomButton extends StatelessWidget {
   const ScrollToBottomButton({
     super.key,
@@ -24,7 +24,8 @@ class ScrollToBottomButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 패널 전환과 같은 fade + scale로 나타나고 사라짐
+    // 패널 전환과 같은 fade + scale로 나타나고 사라짐.
+    // 생성 여부가 바뀔 때는 버튼을 바꿔 끼우지 않고 안의 내용만 바뀐다 (웹 위젯과 동일)
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 150),
       switchInCurve: Curves.easeOut,
@@ -38,7 +39,6 @@ class ScrollToBottomButton extends StatelessWidget {
       ),
       child: visible
           ? _ScrollToBottomFace(
-              key: ValueKey(generating),
               generating: generating,
               colors: colors,
               onTap: onTap,
@@ -50,7 +50,6 @@ class ScrollToBottomButton extends StatelessWidget {
 
 class _ScrollToBottomFace extends StatelessWidget {
   const _ScrollToBottomFace({
-    super.key,
     required this.generating,
     required this.colors,
     required this.onTap,
@@ -82,28 +81,21 @@ class _ScrollToBottomFace extends StatelessWidget {
       ],
     );
 
-    final face = generating
-        ? Container(
-            constraints: const BoxConstraints(minHeight: 32),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            decoration: decoration,
-            // 문구 대신 점 애니메이션으로 생성 중임을 보여주고, 스크린 리더엔 문구로 알림
-            child: Semantics(
+    // 생성 중에도 크기와 모양은 그대로 32px 원이다
+    final face = Container(
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: decoration,
+      child: generating
+          // 화살표 대신 점 애니메이션으로 생성 중임을 보여주고, 스크린 리더엔 문구로 알림.
+          // 웹 위젯과 동일: 4px 점, 간격 3px, 버튼 글자색
+          ? Semantics(
               label: '답변 작성 중',
-              child: ThinkingDots(color: colors.textSecondary),
-            ),
-          )
-        : Container(
-            width: 32,
-            height: 32,
-            alignment: Alignment.center,
-            decoration: decoration,
-            child: Icon(
-              Icons.arrow_downward_rounded,
-              size: 16,
-              color: colors.text,
-            ),
-          );
+              child: ThinkingDots(color: colors.text, size: 4, gap: 3),
+            )
+          : Icon(Icons.arrow_downward_rounded, size: 16, color: colors.text),
+    );
 
     return Tooltip(
       message: '맨 아래로 이동',

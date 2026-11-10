@@ -4,9 +4,20 @@ import 'package:flutter/material.dart';
 ///
 /// 시스템에서 애니메이션 줄이기가 켜져 있으면 멈춘 점으로 표시한다.
 class ThinkingDots extends StatefulWidget {
-  const ThinkingDots({super.key, required this.color});
+  const ThinkingDots({
+    super.key,
+    required this.color,
+    this.size = 6,
+    this.gap = 6,
+  });
 
   final Color color;
+
+  /// 점 하나의 지름. 기본값은 로딩 말풍선에서 쓰는 크기(웹 위젯 thinking-dot의 6px)
+  final double size;
+
+  /// 점 사이 간격
+  final double gap;
 
   @override
   State<ThinkingDots> createState() => _ThinkingDotsState();
@@ -63,14 +74,14 @@ class _ThinkingDotsState extends State<ThinkingDots>
             final opacity = 0.3 + 0.7 * eased;
             final scale = 0.8 + 0.2 * eased;
             return Padding(
-              padding: EdgeInsets.only(left: i == 0 ? 0 : 6),
+              padding: EdgeInsets.only(left: i == 0 ? 0 : widget.gap),
               child: Opacity(
                 opacity: opacity,
                 child: Transform.scale(
                   scale: scale,
                   child: Container(
-                    width: 6,
-                    height: 6,
+                    width: widget.size,
+                    height: widget.size,
                     decoration: BoxDecoration(
                       color: widget.color,
                       shape: BoxShape.circle,
