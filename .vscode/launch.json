@@ -5,41 +5,49 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "gist_chatbot_flutter",
-      "request": "launch",
-      "type": "dart"
-    },
-    {
-      "name": "gist_chatbot_flutter (profile mode)",
-      "request": "launch",
-      "type": "dart",
-      "flutterMode": "profile"
-    },
-    {
-      "name": "gist_chatbot_flutter (release mode)",
-      "request": "launch",
-      "type": "dart",
-      "flutterMode": "release"
-    },
-    {
       "name": "example",
       "cwd": "example",
       "request": "launch",
-      "type": "dart"
+      "type": "dart",
+      // main() 위 Run/Debug 코드렌즈로 실행할 때도 이 설정(위젯 키 포함)을 쓴다.
+      "templateFor": "example",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
     },
     {
       "name": "example (profile mode)",
       "cwd": "example",
       "request": "launch",
       "type": "dart",
-      "flutterMode": "profile"
+      "flutterMode": "profile",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
     },
     {
       "name": "example (release mode)",
       "cwd": "example",
       "request": "launch",
       "type": "dart",
-      "flutterMode": "release"
+      "flutterMode": "release",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
+    },
+    {
+      "name": "gist_chatbot_flutter",
+      "request": "launch",
+      "type": "dart",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
+    },
+    {
+      "name": "gist_chatbot_flutter (profile mode)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "profile",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
+    },
+    {
+      "name": "gist_chatbot_flutter (release mode)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "release",
+      "toolArgs": ["--dart-define-from-file=${workspaceFolder}/example/dart_defines.json"]
     }
   ]
 }
