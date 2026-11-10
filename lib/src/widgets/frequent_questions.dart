@@ -31,8 +31,8 @@ const List<FrequentQuestion> kFrequentQuestions = [
   ),
   FrequentQuestion(
     icon: '🪪',
-    label: '학생증 발급',
-    question: '학생증은 어디서 어떻게 발급받나요?',
+    label: '모바일 출입카드 발급',
+    question: '모바일 출입카드는 어디서 어떻게 발급받나요?',
   ),
   FrequentQuestion(
     icon: '📶',
