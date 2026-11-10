@@ -12,6 +12,7 @@ import 'package:gist_chatbot_flutter/src/widgets/chat_screen.dart';
 /// 스트리밍 청크와 완료 시점을 테스트에서 직접 흘려보내는 API 클라이언트
 class _FakeApiClient extends Fake implements ChatApiClient {
   void Function(String text)? _onChunk;
+  void Function(List<ResearchStep> steps)? _onSteps;
   Completer<SendChatResponse>? _response;
 
   @override
@@ -21,17 +22,24 @@ class _FakeApiClient extends Fake implements ChatApiClient {
   Future<SendChatResponse> sendChatMessage(
     SendChatRequest request, {
     void Function(String text)? onChunk,
+    void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
   }) {
     _onChunk = onChunk;
+    _onSteps = onSteps;
     _response = Completer();
     return _response!.future;
   }
 
   @override
-  Future<ChatMessageDto?> getLatestAssistantMessage() async => null;
+  Future<ChatMessageDto?> getLatestAssistantMessage() async => latest;
+
+  /// 답변 완료 뒤 붙는 서버 메시지 (있으면 피드백 줄이 나타남)
+  ChatMessageDto? latest;
 
   void chunk(String text) => _onChunk!(text);
+
+  void steps(List<ResearchStep> steps) => _onSteps!(steps);
 
   void finish(String answer) =>
       _response!.complete(SendChatResponse(answer: answer));
@@ -153,6 +161,80 @@ void main() {
 
       api.finish(_longAnswer(80));
       await tester.pumpAndSettle();
+    });
+
+    testWidgets('follows research steps as they are added before the answer', (
+      tester,
+    ) async {
+      List<ResearchStep> steps(int count) => [
+        for (var i = 0; i < count; i++)
+          ResearchStep(
+            id: 'call_$i',
+            kind: 'search_notices',
+            label: 'Ziggle 공지 $i개를 불러왔어요',
+            status: ResearchStepStatus.done,
+            thought: '$i번째 검색입니다',
+          ),
+      ];
+
+      await pumpChat(tester);
+      unawaited(controller.sendMessage('질문'));
+      await tester.pump();
+
+      // 본문 없이 단계만 늘어나도 말풍선이 길어지므로 바닥을 따라가야 함
+      for (final count in [10, 20, 30]) {
+        api.steps(steps(count));
+        // 로딩 표시가 계속 움직여 pumpAndSettle이 끝나지 않으므로 정해진 프레임만 돌린다
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        final position = listPosition(tester);
+        expect(position.maxScrollExtent, greaterThan(0));
+        expect(position.pixels, position.maxScrollExtent);
+      }
+
+      api.finish('답변');
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('follows the feedback row that appears after the answer', (
+      tester,
+    ) async {
+      api.latest = const ChatMessageDto(
+        id: 'server-1',
+        role: 'assistant',
+        content: '답변',
+      );
+      await pumpChat(tester);
+      await askAndStream(tester);
+      api.finish(_longAnswer(40));
+      await tester.pumpAndSettle();
+
+      // 본문은 그대로인데 피드백 줄만큼 길어져도 바닥에 붙어 있어야 함
+      expect(find.text('답변이 도움이 되었나요?'), findsOneWidget);
+      final position = listPosition(tester);
+      expect(position.pixels, position.maxScrollExtent);
+      expect(find.byTooltip(_tooltip), findsNothing);
+    });
+
+    testWidgets('keeps the reading position when late content is added above '
+        'the bottom', (tester) async {
+      api.latest = const ChatMessageDto(
+        id: 'server-1',
+        role: 'assistant',
+        content: '답변',
+      );
+      await pumpChat(tester);
+      await askAndStream(tester);
+      await scrollUp(tester);
+      final position = listPosition(tester);
+      final pixels = position.pixels;
+
+      // 위에서 읽는 중이면 피드백 줄이 붙어도 끌어내리지 않음
+      api.finish(_longAnswer(40));
+      await tester.pumpAndSettle();
+      expect(find.text('답변이 도움이 되었나요?'), findsOneWidget);
+      expect(position.pixels, pixels);
     });
 
     testWidgets('stops following when a code block is scrolled sideways', (

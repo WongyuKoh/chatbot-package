@@ -8,12 +8,18 @@ import 'chat_api_types.dart';
 
 /// API 호출 예외
 class ChatApiException implements Exception {
-  ChatApiException(this.message, {this.statusCode});
+  ChatApiException(this.message, {this.statusCode, this.limit});
 
   final String message;
   final int? statusCode;
 
+  /// 429 응답 본문의 `limit` (세션 질문 한도). 일시적 과부하 429에는 없다.
+  final int? limit;
+
   bool get isRateLimit => statusCode == 429;
+
+  /// 세션 질문 횟수를 다 쓴 429. `limit` 없는 429(동시 요청·빈도 제한)와 구분한다.
+  bool get isQuestionLimit => isRateLimit && limit != null;
 
   @override
   String toString() => 'ChatApiException: $message (status: $statusCode)';
@@ -33,17 +39,46 @@ class StreamCancelToken {
   }
 }
 
-String _parseErrorBody(String body, int statusCode) {
-  if (body.isEmpty) return 'Request failed ($statusCode)';
-  try {
-    final json = jsonDecode(body) as Map<String, dynamic>;
-    final msg = json['message'];
-    // NestJS 검증 에러는 message가 문자열 배열로 온다
-    if (msg is List) return msg.join(', ');
-    if (msg is String && msg.isNotEmpty) return msg;
-  } catch (_) {}
-  return body;
+/// 스트림이 계약대로 오지 않았을 때 (SSE가 아닌 200 응답, 깨진 프레임).
+/// 정상 완료로 취급하지 않는다.
+class ChatStreamProtocolException extends ChatApiException {
+  ChatStreamProtocolException(super.message);
 }
+
+/// `[DONE]` 없이 스트림이 끝났을 때. 서버 저장 여부를 알 수 없는 비정상 중단이다.
+class ChatStreamIncompleteException extends ChatApiException {
+  ChatStreamIncompleteException() : super('Stream ended before [DONE]');
+}
+
+/// HTTP 오류 응답을 예외로 바꾼다. 프록시 오류처럼 JSON이 아닌 본문도 올 수 있다.
+ChatApiException _errorFromResponse(String body, int statusCode) {
+  if (body.isEmpty) {
+    return ChatApiException(
+      'Request failed ($statusCode)',
+      statusCode: statusCode,
+    );
+  }
+  var message = body;
+  int? limit;
+  try {
+    final json = jsonDecode(body);
+    if (json is Map<String, dynamic>) {
+      final msg = json['message'];
+      // NestJS 검증 에러는 message가 문자열 배열로 온다
+      if (msg is List) {
+        message = msg.join(', ');
+      } else if (msg is String && msg.isNotEmpty) {
+        message = msg;
+      }
+      final rawLimit = json['limit'];
+      if (rawLimit is int) limit = rawLimit;
+    }
+  } catch (_) {}
+  return ChatApiException(message, statusCode: statusCode, limit: limit);
+}
+
+/// 처리하는 SSE 이벤트 type. 이 밖의 type은 무시한다.
+const _knownEventTypes = {'step', 'resources', 'sources', 'web_sources'};
 
 /// 채팅 API 클라이언트
 class ChatApiClient {
@@ -100,10 +135,7 @@ class ChatApiClient {
     );
 
     if (response.statusCode != 200 && response.statusCode != 201) {
-      throw ChatApiException(
-        _parseErrorBody(response.body, response.statusCode),
-        statusCode: response.statusCode,
-      );
+      throw _errorFromResponse(response.body, response.statusCode);
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -123,10 +155,7 @@ class ChatApiClient {
     );
 
     if (response.statusCode != 200) {
-      throw ChatApiException(
-        _parseErrorBody(response.body, response.statusCode),
-        statusCode: response.statusCode,
-      );
+      throw _errorFromResponse(response.body, response.statusCode);
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -151,10 +180,7 @@ class ChatApiClient {
     );
 
     if (response.statusCode != 200 && response.statusCode != 201) {
-      throw ChatApiException(
-        _parseErrorBody(response.body, response.statusCode),
-        statusCode: response.statusCode,
-      );
+      throw _errorFromResponse(response.body, response.statusCode);
     }
   }
 
@@ -162,12 +188,14 @@ class ChatApiClient {
   Future<SendChatResponse> sendChatMessage(
     SendChatRequest request, {
     void Function(String text)? onChunk,
+    void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
   }) {
     return _streamChatResponse(
       ChatApiEndpoints.sendChatStream,
       body: jsonEncode(request.toJson()),
       onChunk: onChunk,
+      onSteps: onSteps,
       cancelToken: cancelToken,
     );
   }
@@ -176,12 +204,14 @@ class ChatApiClient {
   Future<SendChatResponse> regenerateAnswer(
     String messageId, {
     void Function(String text)? onChunk,
+    void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
   }) {
     return _streamChatResponse(
       ChatApiEndpoints.regenerateStream(messageId),
       body: null,
       onChunk: onChunk,
+      onSteps: onSteps,
       cancelToken: cancelToken,
     );
   }
@@ -191,37 +221,52 @@ class ChatApiClient {
     String path, {
     String? body,
     void Function(String text)? onChunk,
+    void Function(List<ResearchStep> steps)? onSteps,
     StreamCancelToken? cancelToken,
   }) async {
     final req = http.Request('POST', _uri(path))
-      ..headers.addAll(_headers(json: body != null));
+      ..headers.addAll(_headers(json: body != null))
+      ..headers['Accept'] = 'text/event-stream';
     if (body != null) req.body = body;
 
     final streamedResponse = await _client.send(req);
 
     if (streamedResponse.statusCode != 200) {
       final errorBody = await streamedResponse.stream.bytesToString();
-      throw ChatApiException(
-        _parseErrorBody(errorBody, streamedResponse.statusCode),
-        statusCode: streamedResponse.statusCode,
+      throw _errorFromResponse(errorBody, streamedResponse.statusCode);
+    }
+
+    // 200인데 SSE가 아니면 프록시 등이 끼어든 응답이라 파서에 넣지 않는다.
+    // 헤더가 아예 없으면 그대로 읽되, [DONE]이 없으면 아래에서 미완료로 끝난다.
+    final contentType = streamedResponse.headers['content-type'];
+    if (contentType != null &&
+        !contentType.toLowerCase().contains('text/event-stream')) {
+      // 구독하지 않은 응답 스트림이 연결을 붙잡지 않도록 버린다
+      unawaited(streamedResponse.stream.drain<void>().catchError((_) {}));
+      throw ChatStreamProtocolException(
+        'Expected text/event-stream but got $contentType',
       );
     }
 
     final completer = Completer<SendChatResponse>();
     var fullText = '';
     var resources = <RawResource>[];
+    var notices = const <ChatSource>[];
+    var webSources = const <ChatSource>[];
+    var steps = const <ResearchStep>[];
 
     void completeWith() {
       if (!completer.isCompleted) {
         completer.complete(
           SendChatResponse(
             answer: fullText,
-            sources: resources
-                .map(
-                  (r) =>
-                      resolveSource(r, resourceCenterUrl: _resourceCenterUrl),
-                )
-                .toList(),
+            sources: [
+              for (final r in resources)
+                resolveSource(r, resourceCenterUrl: _resourceCenterUrl),
+              ...notices,
+              ...webSources,
+            ],
+            steps: steps,
           ),
         );
       }
@@ -234,49 +279,98 @@ class ChatApiClient {
     }
 
     late final StreamSubscription<String> subscription;
+
+    // 프레임은 빈 줄로 끝난다. 그때까지 온 data: 줄을 모아 한 번에 해석한다.
+    final frame = <String>[];
+
+    void handleFrame(String data) {
+      // [DONE]은 JSON이 아니므로 파싱보다 먼저 비교한다
+      if (data == '[DONE]') {
+        completeWith();
+        subscription.cancel();
+        return;
+      }
+
+      final Map<String, dynamic> parsed;
+      try {
+        parsed = jsonDecode(data) as Map<String, dynamic>;
+      } catch (_) {
+        // 완성된 프레임의 JSON이 깨졌으면 정상 완료로 볼 수 없다
+        failWith(ChatStreamProtocolException('Malformed SSE frame'));
+        subscription.cancel();
+        return;
+      }
+
+      // 아직 모르는 type의 이벤트는 통째로 무시한다
+      final type = parsed['type'];
+      if (type != null && !_knownEventTypes.contains(type)) return;
+
+      final error = parsed['error'];
+      if (error != null) {
+        failWith(ChatApiException(error.toString()));
+        subscription.cancel();
+        return;
+      }
+
+      final content = parsed['content'];
+      if (content is String) {
+        fullText += content;
+        onChunk?.call(fullText);
+      }
+
+      switch (type) {
+        case 'step':
+          final step = ResearchStep.tryParse(parsed);
+          if (step != null) {
+            steps = upsertStep(steps, step);
+            onSteps?.call(steps);
+          }
+        case 'resources':
+          final raw = parsed['resources'];
+          resources = raw is List
+              ? raw
+                    .whereType<Map<String, dynamic>>()
+                    .map(RawResource.fromJson)
+                    .toList()
+              : [];
+        case 'sources':
+          notices = parseExternalSources(
+            parsed['sources'],
+            ChatSourceKind.notice,
+          );
+        case 'web_sources':
+          webSources = parseExternalSources(
+            parsed['sources'],
+            ChatSourceKind.web,
+          );
+      }
+    }
+
     subscription = streamedResponse.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen(
           (line) {
-            if (!line.startsWith('data: ')) return;
-            final data = line.substring(6).trim();
-
-            if (data == '[DONE]') {
+            if (line.isEmpty) {
+              if (frame.isEmpty) return;
+              final data = frame.join('\n').trim();
+              frame.clear();
+              handleFrame(data);
+            } else if (line.startsWith('data:')) {
+              final value = line.substring(5);
+              frame.add(value.startsWith(' ') ? value.substring(1) : value);
+            }
+            // event:, id:, retry:, 주석(:) 줄은 쓰지 않는다
+          },
+          onDone: () {
+            // 마지막 빈 줄 없이 끝난 [DONE]만 완료로 인정하고,
+            // 그 밖에 [DONE] 없이 끝난 스트림은 미완료로 처리한다
+            if (frame.join('\n').trim() == '[DONE]') {
               completeWith();
-              subscription.cancel();
-              return;
-            }
-
-            Map<String, dynamic> parsed;
-            try {
-              parsed = jsonDecode(data) as Map<String, dynamic>;
-            } catch (_) {
-              // 불완전한 JSON 청크는 무시 (웹 위젯과 동일)
-              return;
-            }
-
-            final error = parsed['error'];
-            if (error != null) {
-              failWith(ChatApiException(error.toString()));
-              subscription.cancel();
-              return;
-            }
-
-            final content = parsed['content'];
-            if (content is String) {
-              fullText += content;
-              onChunk?.call(fullText);
-            }
-
-            if (parsed['type'] == 'resources') {
-              final raw = parsed['resources'] as List<dynamic>? ?? [];
-              resources = raw
-                  .map((r) => RawResource.fromJson(r as Map<String, dynamic>))
-                  .toList();
+            } else {
+              failWith(ChatStreamIncompleteException());
             }
           },
-          onDone: completeWith,
           onError: failWith,
           cancelOnError: true,
         );

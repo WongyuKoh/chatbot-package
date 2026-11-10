@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../api/chat_api_types.dart' show SendChatRequest;
 import '../config/gist_chatbot_config.dart';
 import 'pressable.dart';
 
@@ -74,6 +75,27 @@ class _MessageInputState extends State<MessageInput> {
               focusNode: _focusNode,
               maxLines: 4,
               minLines: 1,
+              // 서버 한도를 넘는 질문은 400으로 거절되므로 입력 단계에서 막는다
+              maxLength: SendChatRequest.maxQuestionLength,
+              // 평소에는 글자 수를 숨기고 한도에 가까워졌을 때만 보여 준다
+              buildCounter:
+                  (
+                    context, {
+                    required currentLength,
+                    required isFocused,
+                    required maxLength,
+                  }) {
+                    if (maxLength == null || currentLength < maxLength * 0.9) {
+                      return null;
+                    }
+                    return Text(
+                      '$currentLength / $maxLength',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: colors.textSecondary,
+                      ),
+                    );
+                  },
               style: TextStyle(fontSize: 14, color: colors.text),
               decoration: InputDecoration(
                 hintText: widget.placeholder,

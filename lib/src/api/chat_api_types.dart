@@ -102,29 +102,174 @@ class GetMessagesResponse {
 class SendChatRequest {
   const SendChatRequest({required this.question});
 
+  /// 서버가 받는 질문 최대 길이. 넘으면 400으로 거절된다.
+  static const maxQuestionLength = 4000;
+
   final String question;
 
   Map<String, dynamic> toJson() => {'question': question};
 }
 
+/// 출처 종류. URL 조립 규칙이 서로 다르므로 구분한다.
+/// - document: 내부 참고 문서 (resources 이벤트, 리소스 센터 경로)
+/// - notice: Ziggle 공지 (sources 이벤트, 절대 URL 그대로)
+/// - web: 웹 검색 출처 (web_sources 이벤트, 절대 URL 그대로)
+enum ChatSourceKind { document, notice, web }
+
 /// 참고 자료
 class ChatSource {
-  const ChatSource({required this.type, required this.url, this.title});
+  const ChatSource({
+    required this.type,
+    required this.url,
+    this.title,
+    this.kind = ChatSourceKind.document,
+    this.official = false,
+  });
 
   /// 'url' | 'image'
   final String type;
   final String url;
   final String? title;
+  final ChatSourceKind kind;
+
+  /// 웹 출처가 서버에 설정된 학교 공식 도메인인지. 내용의 정확성을 보증하지 않는다.
+  final bool official;
 
   bool get isImage => type == 'image';
 }
 
+/// 조사 단계 상태. stopped는 서버가 보내지 않는 클라이언트 전용 상태
+/// (오류·중지 시 running으로 남은 단계를 닫을 때 사용).
+enum ResearchStepStatus { running, done, failed, stopped }
+
+/// 에이전트 조사 진행 단계 (SSE step 이벤트)
+class ResearchStep {
+  const ResearchStep({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.status,
+    this.thought,
+    this.resultCount,
+  });
+
+  /// 형식이 맞지 않으면 null (알 수 없는 status 포함)
+  static ResearchStep? tryParse(Map<String, dynamic> json) {
+    final id = json['id'];
+    final label = json['label'];
+    if (id is! String || id.isEmpty || label is! String) return null;
+
+    final ResearchStepStatus status;
+    switch (json['status']) {
+      case 'running':
+        status = ResearchStepStatus.running;
+      case 'done':
+        status = ResearchStepStatus.done;
+      case 'failed':
+        status = ResearchStepStatus.failed;
+      default:
+        return null;
+    }
+
+    final kind = json['kind'];
+    final thought = json['thought'];
+    final resultCount = json['resultCount'];
+    return ResearchStep(
+      id: id,
+      kind: kind is String ? kind : '',
+      label: label,
+      status: status,
+      thought: thought is String && thought.trim().isNotEmpty ? thought : null,
+      resultCount: resultCount is num ? resultCount.toInt() : null,
+    );
+  }
+
+  /// 요청 내 단계 키. 같은 id는 같은 단계다.
+  final String id;
+
+  /// research | search_documents | search_notices | get_notice | search_web | 이후 추가될 값
+  final String kind;
+
+  /// 서버가 만든 진행 문구
+  final String label;
+  final ResearchStepStatus status;
+
+  /// 선택적 행동 설명 (보조 문구). 답변 본문에 합치지 않는다.
+  final String? thought;
+
+  /// 선택적 결과 수. 0도 유효하다.
+  final int? resultCount;
+
+  ResearchStep withStatus(ResearchStepStatus status) => ResearchStep(
+    id: id,
+    kind: kind,
+    label: label,
+    status: status,
+    thought: thought,
+    resultCount: resultCount,
+  );
+}
+
+/// 같은 id의 단계는 덮어쓰고, 새 단계는 처음 본 순서대로 뒤에 붙인다.
+List<ResearchStep> upsertStep(List<ResearchStep> steps, ResearchStep step) {
+  final index = steps.indexWhere((s) => s.id == step.id);
+  if (index < 0) return [...steps, step];
+  return [...steps]..[index] = step;
+}
+
+/// 아직 running인 단계를 주어진 상태로 닫는다 (오류·중지 시 로딩이 남지 않도록).
+List<ResearchStep> settleRunningSteps(
+  List<ResearchStep> steps,
+  ResearchStepStatus status,
+) {
+  if (!steps.any((s) => s.status == ResearchStepStatus.running)) return steps;
+  return [
+    for (final s in steps)
+      s.status == ResearchStepStatus.running ? s.withStatus(status) : s,
+  ];
+}
+
+/// sources / web_sources 이벤트 항목을 출처로 변환한다.
+/// 외부에서 그대로 여는 링크이므로 http(s) 절대 URL만 허용하고, URL 기준으로 중복을 제거한다.
+List<ChatSource> parseExternalSources(Object? raw, ChatSourceKind kind) {
+  if (raw is! List) return const [];
+  final byUrl = <String, ChatSource>{};
+  for (final item in raw) {
+    if (item is! Map<String, dynamic>) continue;
+    final url = item['url'];
+    if (url is! String) continue;
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasAuthority) continue;
+    if (uri.scheme != 'http' && uri.scheme != 'https') continue;
+
+    final title = item['title'];
+    byUrl[url] = ChatSource(
+      type: 'url',
+      url: url,
+      title: title is String && title.trim().isNotEmpty ? title : url,
+      kind: kind,
+      // official이 없거나 잘못 오면 비공식으로 취급 (공식으로 잘못 표시하지 않도록)
+      official: kind == ChatSourceKind.web && item['official'] == true,
+    );
+  }
+  return byUrl.values.toList();
+}
+
 /// 스트림 완료 후 최종 응답
 class SendChatResponse {
-  const SendChatResponse({required this.answer, this.sources = const []});
+  const SendChatResponse({
+    required this.answer,
+    this.sources = const [],
+    this.steps = const [],
+  });
 
   final String answer;
+
+  /// 내부 문서 → 공지 → 웹 순서
   final List<ChatSource> sources;
+
+  /// 조사 단계의 최종 상태 (조사 없이 답한 경우 비어 있음)
+  final List<ResearchStep> steps;
 }
 
 /// SSE 스트림의 resources 이벤트 원본 항목
@@ -189,5 +334,6 @@ ChatSource resolveSource(RawResource resource, {String? resourceCenterUrl}) {
     type: isImage ? 'image' : 'url',
     url: finalUrl,
     title: title,
+    kind: ChatSourceKind.document,
   );
 }
