@@ -1,3 +1,35 @@
+## 0.1.2
+
+- Research steps from the chat stream: shown live while the answer is being
+  prepared, then folded into a one-line summary that expands to list each step
+- Sources grouped by kind (documents, Ziggle notices, web) with their own icons
+  and screen reader labels; web sources outside the school's official domains
+  are marked, and untitled sources show their host name
+- Stream handling follows the backend SSE contract: `[DONE]` completes the
+  answer, error events fail it, and a stream that ends early keeps the received
+  text with an "incomplete" notice; empty keep-alive frames are ignored
+- Stopping cancels the underlying request; stopped and incomplete answers get an
+  italic notice
+- Research steps and sources saved with an answer are restored from history, and
+  a failed stream checks history for a saved answer before giving up
+- Questions are handled one at a time: a question sent while the previous answer
+  is still syncing with history waits for it to finish
+- Question length is counted the way the server counts it (4,000 limit); the
+  input no longer cuts text off, and the counter turns red and sending is
+  disabled when a question is too long
+- The session question limit (429 with `limit`) is told apart from temporary
+  throttling (429 without `limit`), and the banner shows the server's limit
+- A failed or stopped regeneration restores the original answer and is not
+  offered again
+- Scroll-to-bottom button for reading earlier messages, matching the web widget;
+  the list keeps following new content while you are at the bottom
+- Fixed: a malformed resource path in the sources no longer leaves the answer
+  loading forever
+- Fixed: the rate-limit banner closes when the panel is reopened after the retry
+  time has passed
+- Frequent question about student ID cards now uses the mobile access card wording
+- Requires `http` ^1.5.0
+
 ## 0.1.1
 
 - Upgrade package_info_plus to ^10.2.1 (also restores WASM compatibility)
