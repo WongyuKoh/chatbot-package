@@ -10,7 +10,7 @@ import '../session/session_manager.dart';
 import 'chat_message.dart';
 
 /// 조사 단계(step)가 오기 전까지 보여 주는 기본 로딩 문구.
-/// 서버가 단계를 보내면 그 단계의 label로 대체된다.
+/// 서버가 단계를 보내면 말풍선이 이 문구 대신 단계 목록을 보여 준다.
 const _loadingMessageInitial = '자료를 찾아보는 중';
 const _loadingMessageReading = '파일을 읽어보는 중';
 const _loadingMessageThinking = '조금 더 생각 중';
@@ -64,6 +64,9 @@ class ChatController extends ChangeNotifier {
   /// 중지된 이전 요청의 늦은 콜백이 새 요청의 상태를 건드리지 않게 구분한다.
   StreamCancelToken? _cancelToken;
   String? _streamingMessageId;
+
+  /// 재생성 중인 원본 답변. 본문이 오기 전에 중지하면 이 답변으로 되돌린다
+  ChatMessage? _regenerationOriginal;
   bool _disposed = false;
 
   /// 세션 질문 한도 소진(429 + limit) 시 재시도 가능 시각(ms). null이면 경고 없음
@@ -127,7 +130,57 @@ class ChatController extends ChangeNotifier {
     if (!identical(_cancelToken, token)) return;
     _cancelToken = null;
     _streamingMessageId = null;
+    _regenerationOriginal = null;
     _setLoading(false);
+  }
+
+  /// 답변 스트림을 열어 받은 본문·조사 단계를 [messageId] 답변에 실시간으로 반영하고,
+  /// [DONE]으로 끝나면 요청을 정리한 뒤 최종 본문·출처·단계를 저장한다.
+  /// 사용자가 중지했으면 false를 돌려준다 (화면은 stopStreaming()이 이미 정리했다).
+  /// 오류는 그대로 던지므로 호출한 쪽에서 [_closeFailedRequest] 뒤에 처리한다.
+  Future<bool> _streamAnswer(
+    String messageId,
+    StreamCancelToken cancelToken,
+    Future<api.SendChatResponse> Function(
+      void Function(String text) onChunk,
+      void Function(List<ResearchStep> steps) onSteps,
+    )
+    open,
+  ) async {
+    final response = await open(
+      (text) {
+        if (cancelToken.isCancelled) return;
+        _updateMessage(messageId, (m) => m.copyWith(text: text));
+      },
+      (steps) {
+        if (cancelToken.isCancelled) return;
+        _applySteps(messageId, steps);
+      },
+    );
+    if (cancelToken.isCancelled) return false;
+
+    _endRequest(cancelToken);
+    _updateMessage(
+      messageId,
+      (m) => m.copyWith(
+        text: response.answer,
+        sources: response.sources,
+        // [DONE]으로 끝났으므로 서버가 닫지 않은 단계도 끝난 것으로 본다
+        steps: api.settleRunningSteps(response.steps, ResearchStepStatus.done),
+      ),
+    );
+    notifyListeners();
+    return true;
+  }
+
+  /// 실패한 요청의 로딩 상태를 정리하고 남은 단계를 실패로 닫는다.
+  /// 사용자가 중지한 요청이면 아무것도 건드리지 않고 false를 돌려준다:
+  /// stopStreaming()이 화면을 이미 정리했고 그 사이 새 요청이 시작됐을 수 있다.
+  bool _closeFailedRequest(StreamCancelToken cancelToken, String messageId) {
+    if (cancelToken.isCancelled) return false;
+    _endRequest(cancelToken);
+    _settleSteps(messageId, ResearchStepStatus.failed);
+    return true;
   }
 
   int _indexOf(String id) => _messages.indexWhere((m) => m.id == id);
@@ -141,16 +194,11 @@ class ChatController extends ChangeNotifier {
   }
 
   /// 스트림이 보낸 조사 단계 스냅샷을 해당 답변에 반영한다.
-  /// 실제 단계가 오면 타이머 기반 기본 문구를 멈추고 진행 중인 단계의 label을 쓴다.
+  /// 단계가 오면 말풍선은 로딩 문구 대신 단계 목록을 보여 주므로 기본 문구 타이머를 멈춘다.
   void _applySteps(String messageId, List<ResearchStep> steps) {
     if (steps.isEmpty || _streamingMessageId != messageId) return;
     _loadingPhaseTimer1?.cancel();
     _loadingPhaseTimer2?.cancel();
-    final current = steps.lastWhere(
-      (s) => s.status == ResearchStepStatus.running,
-      orElse: () => steps.last,
-    );
-    _loadingMessage = current.label;
     _updateMessage(messageId, (m) => m.copyWith(steps: steps));
   }
 
@@ -166,7 +214,16 @@ class ChatController extends ChangeNotifier {
 
   String? _resolvedAppId;
 
-  Future<String> _ensureSession() async {
+  /// 진행 중인 세션 확인·발급 (없으면 null)
+  Future<String>? _sessionInFlight;
+
+  /// 세션을 확인하고 없으면 발급한다. 이미 진행 중이면 그 결과를 함께 기다린다:
+  /// 발급 중에 중지하고 바로 다시 보내도 발급이 두 번 나가지 않고,
+  /// 중지된 요청의 발급이 늦게 끝나 새 요청의 토큰을 덮어쓰지 않는다
+  Future<String> _ensureSession() => _sessionInFlight ??= _loadOrCreateSession()
+      .whenComplete(() => _sessionInFlight = null);
+
+  Future<String> _loadOrCreateSession() async {
     var token = await _sessionManager.loadSession();
     if (token != null) {
       _apiClient.setSessionToken(token);
@@ -215,8 +272,9 @@ class ChatController extends ChangeNotifier {
         }
         final steps = metadata.steps;
         if (steps != null) {
+          // 저장된 답변은 생성이 끝난 것이므로 서버가 닫지 않은 단계도 끝난 것으로 본다
           next = next.copyWith(
-            steps: api.settleRunningSteps(steps, ResearchStepStatus.stopped),
+            steps: api.settleRunningSteps(steps, ResearchStepStatus.done),
           );
         }
       }
@@ -298,6 +356,12 @@ class ChatController extends ChangeNotifier {
   Future<void> sendMessage(String text) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty || _loading) return;
+    // 입력창에서 막지만, 다른 경로로 들어와도 서버가 길이로 거절할 질문은 보내지 않는다
+    // (보내면 400이 나고, 서버 기준 길이는 화면의 글자 수와 다를 수 있다)
+    if (api.SendChatRequest.lengthOf(trimmed) >
+        api.SendChatRequest.maxQuestionLength) {
+      return;
+    }
 
     _rateLimitRetryAt = null;
     _questionLimit = null;
@@ -326,42 +390,21 @@ class ChatController extends ChangeNotifier {
       // 그 사이 중지했다면 질문을 보내지 않는다 (보내면 저장되고 횟수도 쓴다)
       if (cancelToken.isCancelled) throw StreamCancelledException();
 
-      final response = await _apiClient.sendChatMessage(
-        api.SendChatRequest(question: trimmed),
-        onChunk: (streamedText) {
-          if (cancelToken.isCancelled) return;
-          _updateMessage(assistantId, (m) => m.copyWith(text: streamedText));
-        },
-        onSteps: (steps) {
-          if (cancelToken.isCancelled) return;
-          _applySteps(assistantId, steps);
-        },
-        cancelToken: cancelToken,
-      );
-      if (cancelToken.isCancelled) return;
-
-      _endRequest(cancelToken);
-      _updateMessage(
+      final completed = await _streamAnswer(
         assistantId,
-        (m) => m.copyWith(
-          text: response.answer,
-          sources: response.sources,
-          steps: api.settleRunningSteps(
-            response.steps,
-            ResearchStepStatus.stopped,
-          ),
+        cancelToken,
+        (onChunk, onSteps) => _apiClient.sendChatMessage(
+          api.SendChatRequest(question: trimmed),
+          onChunk: onChunk,
+          onSteps: onSteps,
+          cancelToken: cancelToken,
         ),
       );
-      notifyListeners();
+      if (!completed) return;
 
       await _syncWithHistory(assistantId);
     } catch (e) {
-      // 사용자가 중지한 요청: stopStreaming()이 화면을 이미 정리했고 그 사이
-      // 새 요청이 시작됐을 수 있으므로 여기서는 아무 상태도 건드리지 않는다
-      if (cancelToken.isCancelled) return;
-
-      _endRequest(cancelToken);
-      _settleSteps(assistantId, ResearchStepStatus.failed);
+      if (!_closeFailedRequest(cancelToken, assistantId)) return;
       _handleStreamError(e, assistantId, duringSessionSetup: !sessionReady);
       notifyListeners();
 
@@ -386,59 +429,44 @@ class ChatController extends ChangeNotifier {
       regeneratedAnswer: true,
     );
     _streamingMessageId = regenId;
+    _regenerationOriginal = originalMsg;
     _setLoading(true, regenerating: true);
     notifyListeners();
 
     final cancelToken = StreamCancelToken();
     _cancelToken = cancelToken;
     try {
-      final response = await _apiClient.regenerateAnswer(
-        serverId,
-        onChunk: (streamedText) {
-          if (cancelToken.isCancelled) return;
-          _updateMessage(regenId, (m) => m.copyWith(text: streamedText));
-        },
-        onSteps: (steps) {
-          if (cancelToken.isCancelled) return;
-          _applySteps(regenId, steps);
-        },
-        cancelToken: cancelToken,
-      );
-      if (cancelToken.isCancelled) return;
-
-      _endRequest(cancelToken);
-      _updateMessage(
+      final completed = await _streamAnswer(
         regenId,
-        (m) => m.copyWith(
-          text: response.answer,
-          sources: response.sources,
-          steps: api.settleRunningSteps(
-            response.steps,
-            ResearchStepStatus.stopped,
-          ),
+        cancelToken,
+        (onChunk, onSteps) => _apiClient.regenerateAnswer(
+          serverId,
+          onChunk: onChunk,
+          onSteps: onSteps,
+          cancelToken: cancelToken,
         ),
       );
-      notifyListeners();
+      if (!completed) return;
 
       // 재생성 답변은 원본을 덮어쓰지 않고 새 메시지로 저장된다
       await _syncWithHistory(regenId, regeneratedFrom: serverId);
     } catch (e) {
-      // 사용자가 중지한 요청은 stopStreaming()이 이미 정리했다
-      if (cancelToken.isCancelled) return;
-
-      _endRequest(cancelToken);
-      _settleSteps(regenId, ResearchStepStatus.failed);
+      if (!_closeFailedRequest(cancelToken, regenId)) return;
       debugPrint('Failed to regenerate answer: $e');
       final sessionExpired = e is ChatApiException && e.statusCode == 401;
       if (sessionExpired) _dropSession();
       // 이미 받은 텍스트가 있으면 미완료로 표시해 유지, 없으면 원본 답변 복원.
-      // 서버는 재생성 기회를 스트림 시작 전에 선점하고 실패해도 돌려주지 않을 수 있으므로
-      // 복원한 원본에서 같은 재생성을 다시 시도하지 않게 막는다.
+      // 서버는 재생성 기회를 스트림 시작 전에 선점하고 실패해도 돌려주지 않을 수 있으므로,
+      // 그랬을 수 있는 실패면 복원한 원본에서 같은 재생성을 다시 시도하지 않게 막는다.
+      // 서버가 HTTP 오류로 거절한 요청은 기회를 쓰지 않았으므로 다시 시도할 수 있다.
+      // 세션 만료는 예외: 원본이 이전 세션의 메시지라 다시 시도해도 실패한다.
       final regenIdx = _indexOf(regenId);
       if (regenIdx >= 0) {
         final partial = _messages[regenIdx];
         _messages[regenIdx] = partial.text.isEmpty
-            ? originalMsg.copyWith(regenerationUsed: true)
+            ? originalMsg.copyWith(
+                regenerationUsed: sessionExpired || _mayBeStored(e),
+              )
             : partial.copyWith(text: _markIncomplete(partial.text));
       }
       notifyListeners();
@@ -492,9 +520,16 @@ class ChatController extends ChangeNotifier {
   /// 서버가 이미 저장한 질문·횟수는 되돌려지지 않는다.
   void stopStreaming() {
     final msgId = _streamingMessageId;
+    final original = _regenerationOriginal;
+    _regenerationOriginal = null;
     _setLoading(false);
     if (msgId != null) {
       _updateMessage(msgId, (m) {
+        // 본문이 오기 전에 중지한 재생성: 서버에는 원본이 그대로 있으므로 원본으로 되돌린다.
+        // 재생성 기회는 요청을 보낼 때 선점됐을 수 있어 다시 시도하지 않게 막는다
+        if (original != null && m.text.trim().isEmpty) {
+          return original.copyWith(regenerationUsed: true);
+        }
         final text = m.text.trim().isNotEmpty
             ? _withNotice(m.text, '응답이 중지되었습니다')
             : '응답이 중지되었습니다.';

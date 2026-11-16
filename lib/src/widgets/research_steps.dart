@@ -36,7 +36,16 @@ class ResearchSteps extends StatefulWidget {
 }
 
 class _ResearchStepsState extends State<ResearchSteps> {
-  bool _expanded = false;
+  /// 펼침 상태는 PageStorage에 답변별로 둔다 (ExpansionTile과 같은 방식).
+  /// 스크롤로 화면 밖에 나가 위젯이 사라졌다 돌아와도 유지된다.
+  /// 답변을 구분하는 [PageStorageKey]는 만드는 쪽(MessageBubble)이 key로 넘긴다.
+  late bool _expanded =
+      PageStorage.maybeOf(context)?.readState(context) as bool? ?? false;
+
+  void _toggleExpanded() {
+    setState(() => _expanded = !_expanded);
+    PageStorage.maybeOf(context)?.writeState(context, _expanded);
+  }
 
   ResearchStep? get _research {
     for (final step in widget.steps) {
@@ -151,7 +160,7 @@ class _ResearchStepsState extends State<ResearchSteps> {
               expanded: _expanded,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => setState(() => _expanded = !_expanded),
+                onTap: _toggleExpanded,
                 child: Padding(
                   // 한 줄 요약이라 터치 영역을 위아래로 넓힌다
                   padding: const EdgeInsets.symmetric(vertical: 4),

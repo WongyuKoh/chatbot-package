@@ -184,8 +184,8 @@ void main() {
         'https://ziggle.gistory.me/notice/1',
         'https://ziggle.gistory.me/notice/4',
       ]);
-      // 제목이 비면 URL을 링크 문구로 쓴다
-      expect(response.sources[1].title, 'https://ziggle.gistory.me/notice/4');
+      // 제목이 비면 비워 두어 배지가 호스트명을 보여 주게 한다
+      expect(response.sources[1].title, isNull);
     });
 
     test('unknown event types are ignored', () async {

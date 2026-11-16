@@ -157,50 +157,44 @@ void main() {
   ChatMessage answer() => controller.messages.last;
 
   group('ChatController research steps', () {
-    test(
-      'stores steps on the streaming answer and shows the running label',
-      () async {
-        await ask('장학금 신청 기간 알려줘');
-        expect(controller.loadingMessage, '자료를 찾아보는 중');
-        expect(answer().steps, isEmpty);
+    test('stores steps on the streaming answer', () async {
+      await ask('장학금 신청 기간 알려줘');
+      expect(controller.loadingMessage, '자료를 찾아보는 중');
+      expect(answer().steps, isEmpty);
 
-        api.step('research', '자료를 더 찾아보고 있어요', ResearchStepStatus.running);
-        api.step(
-          'r1_call_1',
-          'Ziggle 공지를 찾고 있어요',
-          ResearchStepStatus.running,
-          kind: 'search_notices',
-        );
-        expect(answer().steps.map((s) => s.id), ['research', 'r1_call_1']);
-        expect(controller.loadingMessage, 'Ziggle 공지를 찾고 있어요');
+      api.step('research', '자료를 더 찾아보고 있어요', ResearchStepStatus.running);
+      api.step(
+        'r1_call_1',
+        'Ziggle 공지를 찾고 있어요',
+        ResearchStepStatus.running,
+        kind: 'search_notices',
+      );
+      expect(answer().steps.map((s) => s.id), ['research', 'r1_call_1']);
 
-        // 하위 단계가 끝나면 아직 진행 중인 단계의 문구로 돌아간다
-        api.step(
-          'r1_call_1',
-          'Ziggle 공지 3개를 불러왔어요',
-          ResearchStepStatus.done,
-          kind: 'search_notices',
-        );
-        expect(answer().steps, hasLength(2));
-        expect(controller.loadingMessage, '자료를 더 찾아보고 있어요');
+      api.step(
+        'r1_call_1',
+        'Ziggle 공지 3개를 불러왔어요',
+        ResearchStepStatus.done,
+        kind: 'search_notices',
+      );
+      expect(answer().steps, hasLength(2));
 
-        api.step('research', '자료 3개를 모았어요', ResearchStepStatus.done);
-        api.chunk('답변');
-        api.finish('답변');
-        await sent;
+      api.step('research', '자료 3개를 모았어요', ResearchStepStatus.done);
+      api.chunk('답변');
+      api.finish('답변');
+      await sent;
 
-        expect(controller.loading, isFalse);
-        expect(answer().text, '답변');
-        expect(answer().steps.map((s) => s.label), [
-          '자료 3개를 모았어요',
-          'Ziggle 공지 3개를 불러왔어요',
-        ]);
-        expect(
-          answer().steps.every((s) => s.status == ResearchStepStatus.done),
-          isTrue,
-        );
-      },
-    );
+      expect(controller.loading, isFalse);
+      expect(answer().text, '답변');
+      expect(answer().steps.map((s) => s.label), [
+        '자료 3개를 모았어요',
+        'Ziggle 공지 3개를 불러왔어요',
+      ]);
+      expect(
+        answer().steps.every((s) => s.status == ResearchStepStatus.done),
+        isTrue,
+      );
+    });
 
     test('keeps steps per answer when ids repeat across questions', () async {
       await ask('첫 질문');
@@ -239,7 +233,7 @@ void main() {
       api.finish('답변');
       await sent;
 
-      expect(answer().steps.single.status, ResearchStepStatus.stopped);
+      expect(answer().steps.single.status, ResearchStepStatus.done);
     });
 
     test('stopping marks running steps as stopped', () async {
@@ -289,7 +283,6 @@ void main() {
       expect(answer().steps, isEmpty);
 
       api.step('research', '다시 조사', ResearchStepStatus.running);
-      expect(controller.loadingMessage, '다시 조사');
       api.step('research', '다시 조사 완료', ResearchStepStatus.done);
       api.finish('새 답변');
       await regenerated;
@@ -335,7 +328,8 @@ void main() {
 
       api.step('research', '자료를 더 찾아보고 있어요', ResearchStepStatus.running);
       await tester.pump(const Duration(seconds: 10));
-      expect(controller.loadingMessage, '자료를 더 찾아보고 있어요');
+      // 6초 문구('조금 더 생각 중')로 넘어가지 않는다
+      expect(controller.loadingMessage, '파일을 읽어보는 중');
 
       api.finish('답변');
       await sent;

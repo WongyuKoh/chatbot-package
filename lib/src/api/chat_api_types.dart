@@ -1,3 +1,5 @@
+import '../web_uri.dart';
+
 /// 앱용 세션 발급 요청 (clientType=app, appId 필수)
 class CreateSessionRequest {
   const CreateSessionRequest({
@@ -179,12 +181,24 @@ class GetMessagesResponse {
   final String? nextCursor;
 }
 
+/// 서버 길이 계산용 (validator.js isLength와 같은 UTF-16 코드 유닛 기준 정규식)
+final _presentationSequence = RegExp('[^\u{FE0F}\u{FE0E}][\u{FE0F}\u{FE0E}]');
+final _surrogatePair = RegExp('[\uD800-\uDBFF][\uDC00-\uDFFF]');
+
 /// 채팅 메시지 전송 요청
 class SendChatRequest {
   const SendChatRequest({required this.question});
 
-  /// 서버가 받는 질문 최대 길이. 넘으면 400으로 거절된다.
+  /// 서버가 받는 질문 최대 길이 ([lengthOf] 기준). 넘으면 400으로 거절된다.
   static const maxQuestionLength = 4000;
+
+  /// 서버(class-validator `@MaxLength` → validator.js `isLength`)와 같은 방식으로 센 길이.
+  /// UTF-16 길이에서 서로게이트 쌍과 "글자 + 이모지 표시 선택자(U+FE0E/FE0F)"를 한 자로 친다.
+  /// 화면에 보이는 글자 수와 같거나 크다. 예: 👍🏽 = 2, 👨‍👩‍👧‍👦 = 7, NFD 한글 '한' = 3
+  static int lengthOf(String question) =>
+      question.length -
+      _presentationSequence.allMatches(question).length -
+      _surrogatePair.allMatches(question).length;
 
   final String question;
 
@@ -220,7 +234,7 @@ class ChatSource {
 }
 
 /// 조사 단계 상태. stopped는 서버가 보내지 않는 클라이언트 전용 상태
-/// (오류·중지 시 running으로 남은 단계를 닫을 때 사용).
+/// (사용자가 중지했을 때 running으로 남은 단계를 닫을 때 사용).
 enum ResearchStepStatus { running, done, failed, stopped }
 
 /// 에이전트 조사 진행 단계 (SSE step 이벤트)
@@ -298,7 +312,7 @@ List<ResearchStep> upsertStep(List<ResearchStep> steps, ResearchStep step) {
   return [...steps]..[index] = step;
 }
 
-/// 아직 running인 단계를 주어진 상태로 닫는다 (오류·중지 시 로딩이 남지 않도록).
+/// 아직 running인 단계를 주어진 상태로 닫는다 (완료·오류·중지 뒤에 로딩이 남지 않도록).
 List<ResearchStep> settleRunningSteps(
   List<ResearchStep> steps,
   ResearchStepStatus status,
@@ -320,14 +334,14 @@ List<ChatSource> parseExternalSources(Object? raw, ChatSourceKind kind) {
     final url = item['url'];
     if (url is! String) continue;
     final uri = Uri.tryParse(url);
-    if (uri == null || uri.host.isEmpty) continue;
-    if (uri.scheme != 'http' && uri.scheme != 'https') continue;
+    if (uri == null || !isWebUri(uri)) continue;
 
     final title = item['title'];
     byUrl[url] = ChatSource(
       type: 'url',
       url: url,
-      title: title is String && title.trim().isNotEmpty ? title : url,
+      // 제목이 없으면 비워 둔다. 배지가 URL 대신 호스트명을 보여 준다
+      title: title is String && title.trim().isNotEmpty ? title : null,
       kind: kind,
       // official이 없거나 잘못 오면 비공식으로 취급 (공식으로 잘못 표시하지 않도록)
       official: kind == ChatSourceKind.web && item['official'] == true,

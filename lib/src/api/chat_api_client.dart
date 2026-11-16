@@ -373,7 +373,8 @@ class ChatApiClient {
               if (frame.isEmpty) return;
               final data = frame.join('\n').trim();
               frame.clear();
-              handleFrame(data);
+              // data가 빈 프레임(연결 유지용 `data:` 등)은 SSE 명세대로 이벤트로 보지 않는다
+              if (data.isNotEmpty) handleFrame(data);
             } else if (line.startsWith('data:')) {
               final value = line.substring(5);
               frame.add(value.startsWith(' ') ? value.substring(1) : value);

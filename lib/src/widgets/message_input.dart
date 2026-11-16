@@ -4,6 +4,9 @@ import '../api/chat_api_types.dart' show SendChatRequest;
 import '../config/gist_chatbot_config.dart';
 import 'pressable.dart';
 
+/// 서버 한도를 넘었을 때 카운터 색 (전송 버튼도 함께 비활성화된다)
+const _overLimitColor = Color(0xFFDC2626);
+
 /// 메시지 입력창 + 전송/중지 버튼 (웹 위젯과 동일: 로딩 중엔 중지 버튼으로 전환)
 class MessageInput extends StatefulWidget {
   const MessageInput({
@@ -30,13 +33,23 @@ class _MessageInputState extends State<MessageInput> {
   final _focusNode = FocusNode();
   bool _hasText = false;
 
+  /// 서버 기준 길이가 한도를 넘었는지 (보이는 글자 수는 한도 이내여도 넘을 수 있다)
+  bool _tooLong = false;
+
+  /// 서버가 받는 값(앞뒤 공백 제거)을 서버와 같은 방식으로 센 길이
+  int get _serverLength => SendChatRequest.lengthOf(_controller.text.trim());
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(() {
       final hasText = _controller.text.trim().isNotEmpty;
-      if (hasText != _hasText) {
-        setState(() => _hasText = hasText);
+      final tooLong = _serverLength > SendChatRequest.maxQuestionLength;
+      if (hasText != _hasText || tooLong != _tooLong) {
+        setState(() {
+          _hasText = hasText;
+          _tooLong = tooLong;
+        });
       }
     });
   }
@@ -51,6 +64,9 @@ class _MessageInputState extends State<MessageInput> {
   void _submit() {
     final text = _controller.text.trim();
     if (text.isEmpty || widget.loading) return;
+    if (SendChatRequest.lengthOf(text) > SendChatRequest.maxQuestionLength) {
+      return;
+    }
     widget.onSend(text);
     _controller.clear();
   }
@@ -58,7 +74,7 @@ class _MessageInputState extends State<MessageInput> {
   @override
   Widget build(BuildContext context) {
     final colors = widget.colors;
-    final canSend = _hasText && !widget.loading;
+    final canSend = _hasText && !_tooLong && !widget.loading;
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -75,9 +91,12 @@ class _MessageInputState extends State<MessageInput> {
               focusNode: _focusNode,
               maxLines: 4,
               minLines: 1,
-              // 서버 한도를 넘는 질문은 400으로 거절되므로 입력 단계에서 막는다
+              // maxLength는 보이는 글자 수로 센다. 서버 기준 길이는 항상 그 이상이므로
+              // 여기서 막힌 입력은 어차피 서버가 거절한다 (한글 조합·붙여넣기는 그대로 처리)
               maxLength: SendChatRequest.maxQuestionLength,
-              // 평소에는 글자 수를 숨기고 한도에 가까워졌을 때만 보여 준다
+              // 카운터와 전송 가능 여부는 서버 기준 길이로 판단한다.
+              // 이모지·NFD 한글이 섞이면 보이는 글자가 한도 이내여도 서버 기준으로는 넘을 수 있다.
+              // 평소에는 숨기고 한도에 가까워졌을 때만 보여 준다
               buildCounter:
                   (
                     context, {
@@ -85,14 +104,16 @@ class _MessageInputState extends State<MessageInput> {
                     required isFocused,
                     required maxLength,
                   }) {
-                    if (maxLength == null || currentLength < maxLength * 0.9) {
-                      return null;
-                    }
+                    const max = SendChatRequest.maxQuestionLength;
+                    final length = _serverLength;
+                    if (length < max * 0.9) return null;
                     return Text(
-                      '$currentLength / $maxLength',
+                      '$length / $max',
                       style: TextStyle(
                         fontSize: 11,
-                        color: colors.textSecondary,
+                        color: length > max
+                            ? _overLimitColor
+                            : colors.textSecondary,
                       ),
                     );
                   },

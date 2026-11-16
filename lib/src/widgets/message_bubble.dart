@@ -63,6 +63,9 @@ class MessageBubble extends StatelessWidget {
               // 조사 단계: 본문 전에는 펼쳐서, 본문이 오면 한 줄 요약으로
               if (message.steps.isNotEmpty)
                 ResearchSteps(
+                  // 같은 자리에 다른 답변이 오면(재생성) 펼침 상태를 새로 시작하고,
+                  // 답변별 펼침 상태를 PageStorage에 저장하는 키로도 쓴다
+                  key: PageStorageKey('research_steps_${message.id}'),
                   steps: message.steps,
                   colors: colors,
                   live: waitingForText,
@@ -212,6 +215,8 @@ class _SourceBadge extends StatelessWidget {
       link: true,
       label: '$kindLabel: $_title',
       excludeSemantics: true,
+      // 하위 Pressable의 tap 액션이 제외되므로 스크린리더 활성화를 여기서 연결한다
+      onTap: () => openExternalLink(source.url),
       child: _buildBadge(icon),
     );
   }
