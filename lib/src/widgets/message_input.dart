@@ -91,10 +91,9 @@ class _MessageInputState extends State<MessageInput> {
               focusNode: _focusNode,
               maxLines: 4,
               minLines: 1,
-              // maxLength는 보이는 글자 수로 센다. 서버 기준 길이는 항상 그 이상이므로
-              // 여기서 막힌 입력은 어차피 서버가 거절한다 (한글 조합·붙여넣기는 그대로 처리)
-              maxLength: SendChatRequest.maxQuestionLength,
-              // 카운터와 전송 가능 여부는 서버 기준 길이로 판단한다.
+              // 입력은 자르지 않는다(maxLength 없음). 자르면 앞뒤 공백까지 세어서,
+              // 공백을 지우고 보내면 한도 안인 질문의 끝이 잘려 나갈 수 있다.
+              // 카운터와 전송 가능 여부는 서버가 받는 값(앞뒤 공백 제거)의 서버 기준 길이로 판단한다.
               // 이모지·NFD 한글이 섞이면 보이는 글자가 한도 이내여도 서버 기준으로는 넘을 수 있다.
               // 평소에는 숨기고 한도에 가까워졌을 때만 보여 준다
               buildCounter:

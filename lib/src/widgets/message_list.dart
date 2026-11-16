@@ -210,6 +210,10 @@ class _MessageListState extends State<MessageList> {
         _scrollController.jumpTo(position.maxScrollExtent);
       }
     });
+    // addPostFrameCallback은 다음 프레임을 기다리기만 하고 요청하지는 않는다.
+    // 길이 변화 알림은 프레임이 끝난 뒤 오므로, 화면이 멈춘 상태에서 높이만 바뀌면
+    // 다른 갱신이 있을 때까지 바닥 이동이 미뤄진다. 다음 프레임을 직접 요청한다
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   /// 따라가는 중에는 숨김: 스트리밍 중 바닥과 잠깐 벌어질 때 깜빡이지 않도록

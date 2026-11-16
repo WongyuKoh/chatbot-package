@@ -16,6 +16,10 @@ const _loadingMessageReading = '파일을 읽어보는 중';
 const _loadingMessageThinking = '조금 더 생각 중';
 const _loadingMessageRegenerating = '답변을 다시 생성하는 중';
 
+/// 다음 요청이 이전 요청의 후속 작업(히스토리 조회)을 기다리는 최대 시간.
+/// 히스토리 조회에는 시간 제한이 없으므로 응답이 오지 않아도 다음 질문이 막히지 않게 한다
+const _followUpWaitLimit = Duration(seconds: 5);
+
 /// 받은 본문 뒤에 상태 안내(중지·미완료)를 기울임 문단으로 덧붙인다.
 /// 기울임은 `*…*`로 쓴다. gpt_markdown은 1.3.3부터 `_…_`도 기울임으로 처리하지만
 /// 이 패키지가 허용하는 그 이전 버전(1.1.8~)에서는 밑줄 문자가 그대로 보인다.
@@ -67,6 +71,16 @@ class ChatController extends ChangeNotifier {
 
   /// 재생성 중인 원본 답변. 본문이 오기 전에 중지하면 이 답변으로 되돌린다
   ChatMessage? _regenerationOriginal;
+
+  /// 직전에 끝난 요청의 후속 작업(히스토리 동기화·복구)이 끝나면 완료된다.
+  /// 로딩은 스트림이 끝나는 즉시 풀리지만 후속 작업은 그 뒤에도 이어진다. 그 사이 보낸
+  /// 다음 질문이 먼저 저장되면 "최신 메시지" 조회가 새 질문의 답변을 가리킬 수 있으므로,
+  /// 다음 요청은 이게 끝난 뒤에 서버로 보낸다. 사용자가 중지한 요청에는 후속 작업이 없다.
+  Future<void> _followUp = Future.value();
+
+  /// 이전 요청의 후속 작업을 기다린다. [_followUpWaitLimit]이 지나면 더 기다리지 않는다
+  Future<void> _waitForFollowUp() =>
+      _followUp.timeout(_followUpWaitLimit, onTimeout: () {});
   bool _disposed = false;
 
   /// 세션 질문 한도 소진(429 + limit) 시 재시도 가능 시각(ms). null이면 경고 없음
@@ -126,8 +140,10 @@ class ChatController extends ChangeNotifier {
   }
 
   /// 요청이 끝났을 때 공유 상태를 정리한다. 이미 다른 요청이 시작됐다면 건드리지 않는다.
-  void _endRequest(StreamCancelToken token) {
+  /// 로딩을 푸는 순간 [followUp]을 후속 작업으로 등록한다 (끝나면 호출한 쪽이 완료한다).
+  void _endRequest(StreamCancelToken token, Completer<void> followUp) {
     if (!identical(_cancelToken, token)) return;
+    _followUp = followUp.future;
     _cancelToken = null;
     _streamingMessageId = null;
     _regenerationOriginal = null;
@@ -141,6 +157,7 @@ class ChatController extends ChangeNotifier {
   Future<bool> _streamAnswer(
     String messageId,
     StreamCancelToken cancelToken,
+    Completer<void> followUp,
     Future<api.SendChatResponse> Function(
       void Function(String text) onChunk,
       void Function(List<ResearchStep> steps) onSteps,
@@ -159,7 +176,7 @@ class ChatController extends ChangeNotifier {
     );
     if (cancelToken.isCancelled) return false;
 
-    _endRequest(cancelToken);
+    _endRequest(cancelToken, followUp);
     _updateMessage(
       messageId,
       (m) => m.copyWith(
@@ -176,9 +193,13 @@ class ChatController extends ChangeNotifier {
   /// 실패한 요청의 로딩 상태를 정리하고 남은 단계를 실패로 닫는다.
   /// 사용자가 중지한 요청이면 아무것도 건드리지 않고 false를 돌려준다:
   /// stopStreaming()이 화면을 이미 정리했고 그 사이 새 요청이 시작됐을 수 있다.
-  bool _closeFailedRequest(StreamCancelToken cancelToken, String messageId) {
+  bool _closeFailedRequest(
+    StreamCancelToken cancelToken,
+    String messageId,
+    Completer<void> followUp,
+  ) {
     if (cancelToken.isCancelled) return false;
-    _endRequest(cancelToken);
+    _endRequest(cancelToken, followUp);
     _settleSteps(messageId, ResearchStepStatus.failed);
     return true;
   }
@@ -381,10 +402,14 @@ class ChatController extends ChangeNotifier {
     // 세션 발급을 기다리는 동안에도 중지할 수 있도록 토큰을 먼저 만든다
     final cancelToken = StreamCancelToken();
     _cancelToken = cancelToken;
+    // 이 요청의 후속 작업(히스토리 동기화·복구)이 끝나면 완료한다
+    final followUp = Completer<void>();
 
     // 세션 발급 단계의 400/403/404는 위젯 설정 오류, 그 뒤는 질문 요청의 오류다
     var sessionReady = false;
     try {
+      // 이전 답변의 후속 작업이 끝난 뒤에 보낸다 (그 조회 결과에 이 질문의 답변이 섞이지 않게)
+      await _waitForFollowUp();
       await _ensureSession();
       sessionReady = true;
       // 그 사이 중지했다면 질문을 보내지 않는다 (보내면 저장되고 횟수도 쓴다)
@@ -393,6 +418,7 @@ class ChatController extends ChangeNotifier {
       final completed = await _streamAnswer(
         assistantId,
         cancelToken,
+        followUp,
         (onChunk, onSteps) => _apiClient.sendChatMessage(
           api.SendChatRequest(question: trimmed),
           onChunk: onChunk,
@@ -404,13 +430,15 @@ class ChatController extends ChangeNotifier {
 
       await _syncWithHistory(assistantId);
     } catch (e) {
-      if (!_closeFailedRequest(cancelToken, assistantId)) return;
+      if (!_closeFailedRequest(cancelToken, assistantId, followUp)) return;
       _handleStreamError(e, assistantId, duringSessionSetup: !sessionReady);
       notifyListeners();
 
       if (sessionReady && _mayBeStored(e)) {
         await _recoverAnswer(assistantId, trimmed);
       }
+    } finally {
+      followUp.complete();
     }
   }
 
@@ -435,10 +463,15 @@ class ChatController extends ChangeNotifier {
 
     final cancelToken = StreamCancelToken();
     _cancelToken = cancelToken;
+    final followUp = Completer<void>();
     try {
+      await _waitForFollowUp();
+      if (cancelToken.isCancelled) throw StreamCancelledException();
+
       final completed = await _streamAnswer(
         regenId,
         cancelToken,
+        followUp,
         (onChunk, onSteps) => _apiClient.regenerateAnswer(
           serverId,
           onChunk: onChunk,
@@ -451,7 +484,7 @@ class ChatController extends ChangeNotifier {
       // 재생성 답변은 원본을 덮어쓰지 않고 새 메시지로 저장된다
       await _syncWithHistory(regenId, regeneratedFrom: serverId);
     } catch (e) {
-      if (!_closeFailedRequest(cancelToken, regenId)) return;
+      if (!_closeFailedRequest(cancelToken, regenId, followUp)) return;
       debugPrint('Failed to regenerate answer: $e');
       final sessionExpired = e is ChatApiException && e.statusCode == 401;
       if (sessionExpired) _dropSession();
@@ -479,6 +512,8 @@ class ChatController extends ChangeNotifier {
           originalServerId: serverId,
         );
       }
+    } finally {
+      followUp.complete();
     }
   }
 
@@ -510,7 +545,9 @@ class ChatController extends ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to submit feedback: $e');
     } finally {
-      _feedbackBusyId = null;
+      // 재생성 경로는 위에서 이미 풀었고, 그 사이 다른 답변의 피드백이 시작됐을 수 있다.
+      // 그 작업의 중복 클릭 방지를 풀지 않도록 이 작업의 표시만 지운다
+      if (_feedbackBusyId == msg.id) _feedbackBusyId = null;
       notifyListeners();
     }
   }

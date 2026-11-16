@@ -417,6 +417,17 @@ class RawResource {
   final List<String> formats;
 }
 
+/// 퍼센트 인코딩을 푼다. 잘못된 16진수(`%ZZ`)나 UTF-8이 아닌 바이트(`%FF`)면 null
+String? _tryDecodeComponent(String value) {
+  try {
+    return Uri.decodeComponent(value);
+  } on ArgumentError {
+    return null;
+  } on FormatException {
+    return null;
+  }
+}
+
 /// 웹 위젯과 동일한 규칙으로 리소스를 출처로 변환한다.
 /// resourceCenterUrl이 있으면 `{base}/resource/{cleanPath}` 형태의 URL을 조립하고,
 /// 없으면 원본 url을 그대로 사용한다.
@@ -450,9 +461,11 @@ ChatSource resolveSource(RawResource resource, {String? resourceCenterUrl}) {
     final parts = cleanPath.split('/');
     var fileName = parts.isNotEmpty ? parts.last : '참고자료';
     if (fileName.isEmpty) fileName = '참고자료';
-    fileName = Uri.decodeComponent(
-      fileName,
-    ).replaceAll(RegExp(r'\.(pdf|png|jpg|jpeg)$', caseSensitive: false), '');
+    // 퍼센트 인코딩이 깨져 있으면 디코딩하지 않고 그대로 보여 준다
+    fileName = (_tryDecodeComponent(fileName) ?? fileName).replaceAll(
+      RegExp(r'\.(pdf|png|jpg|jpeg)$', caseSensitive: false),
+      '',
+    );
     title = fileName.length > 20 ? '${fileName.substring(0, 20)}...' : fileName;
   }
 

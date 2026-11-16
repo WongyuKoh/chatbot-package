@@ -271,8 +271,15 @@ class ChatApiClient {
     var webSources = const <ChatSource>[];
     var steps = const <ResearchStep>[];
 
-    void completeWith() {
+    void failWith(Object error, [StackTrace? st]) {
       if (!completer.isCompleted) {
+        completer.completeError(error, st);
+      }
+    }
+
+    void completeWith() {
+      if (completer.isCompleted) return;
+      try {
         completer.complete(
           SendChatResponse(
             answer: fullText,
@@ -285,12 +292,10 @@ class ChatApiClient {
             steps: steps,
           ),
         );
-      }
-    }
-
-    void failWith(Object error, [StackTrace? st]) {
-      if (!completer.isCompleted) {
-        completer.completeError(error, st);
+      } catch (e, st) {
+        // 스트림 콜백(onData·onDone) 안의 예외는 onError로 가지 않는다.
+        // 최종 응답을 만들다 실패해도 요청이 끝나지 않은 채 남지 않게 실패로 끝낸다
+        failWith(e, st);
       }
     }
 
