@@ -20,15 +20,16 @@ void main() {
     return sent;
   }
 
-  testWidgets('caps the question at the server limit', (tester) async {
+  testWidgets('blocks a question over the server limit', (tester) async {
     final sent = await pumpInput(tester);
 
+    // 입력은 자르지 않고, 한도를 넘었다고 보여 준 뒤 전송을 막는다
     await tester.enterText(find.byType(TextField), 'a' * 4100);
     await tester.pump();
-    expect(find.text('4000 / 4000'), findsOneWidget);
+    expect(find.text('4100 / 4000'), findsOneWidget);
 
     await tester.tap(find.byTooltip('전송'));
-    expect(sent.single.length, 4000);
+    expect(sent, isEmpty);
   });
 
   testWidgets('hides the counter for ordinary questions', (tester) async {

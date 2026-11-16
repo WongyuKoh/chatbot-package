@@ -489,17 +489,15 @@ class ChatController extends ChangeNotifier {
       final sessionExpired = e is ChatApiException && e.statusCode == 401;
       if (sessionExpired) _dropSession();
       // 이미 받은 텍스트가 있으면 미완료로 표시해 유지, 없으면 원본 답변 복원.
-      // 서버는 재생성 기회를 스트림 시작 전에 선점하고 실패해도 돌려주지 않을 수 있으므로,
-      // 그랬을 수 있는 실패면 복원한 원본에서 같은 재생성을 다시 시도하지 않게 막는다.
-      // 서버가 HTTP 오류로 거절한 요청은 기회를 쓰지 않았으므로 다시 시도할 수 있다.
-      // 세션 만료는 예외: 원본이 이전 세션의 메시지라 다시 시도해도 실패한다.
+      // 복원한 원본에서는 같은 재생성을 다시 시도하지 않게 막는다. 서버 계약상
+      // (chatbot-be docs/chat-sse-contract.md) 재생성 기회는 스트리밍 전에 선점되고,
+      // 그 뒤 오류·취소·admission 429가 나도 선점이 남을 수 있다.
+      // 선점 전에 거절되는 400·404·401도 다시 보내면 같은 이유로 실패한다.
       final regenIdx = _indexOf(regenId);
       if (regenIdx >= 0) {
         final partial = _messages[regenIdx];
         _messages[regenIdx] = partial.text.isEmpty
-            ? originalMsg.copyWith(
-                regenerationUsed: sessionExpired || _mayBeStored(e),
-              )
+            ? originalMsg.copyWith(regenerationUsed: true)
             : partial.copyWith(text: _markIncomplete(partial.text));
       }
       notifyListeners();
