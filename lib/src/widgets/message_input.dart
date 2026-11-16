@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../api/chat_api_types.dart' show SendChatRequest;
 import '../config/gist_chatbot_config.dart';
 import 'pressable.dart';
+
+/// 서버 한도를 넘었을 때 카운터 색 (전송 버튼도 함께 비활성화된다)
+const _overLimitColor = Color(0xFFDC2626);
 
 /// 메시지 입력창 + 전송/중지 버튼 (웹 위젯과 동일: 로딩 중엔 중지 버튼으로 전환)
 class MessageInput extends StatefulWidget {
@@ -29,13 +33,23 @@ class _MessageInputState extends State<MessageInput> {
   final _focusNode = FocusNode();
   bool _hasText = false;
 
+  /// 서버 기준 길이가 한도를 넘었는지 (보이는 글자 수는 한도 이내여도 넘을 수 있다)
+  bool _tooLong = false;
+
+  /// 서버가 받는 값(앞뒤 공백 제거)을 서버와 같은 방식으로 센 길이
+  int get _serverLength => SendChatRequest.lengthOf(_controller.text.trim());
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(() {
       final hasText = _controller.text.trim().isNotEmpty;
-      if (hasText != _hasText) {
-        setState(() => _hasText = hasText);
+      final tooLong = _serverLength > SendChatRequest.maxQuestionLength;
+      if (hasText != _hasText || tooLong != _tooLong) {
+        setState(() {
+          _hasText = hasText;
+          _tooLong = tooLong;
+        });
       }
     });
   }
@@ -50,6 +64,9 @@ class _MessageInputState extends State<MessageInput> {
   void _submit() {
     final text = _controller.text.trim();
     if (text.isEmpty || widget.loading) return;
+    if (SendChatRequest.lengthOf(text) > SendChatRequest.maxQuestionLength) {
+      return;
+    }
     widget.onSend(text);
     _controller.clear();
   }
@@ -57,7 +74,7 @@ class _MessageInputState extends State<MessageInput> {
   @override
   Widget build(BuildContext context) {
     final colors = widget.colors;
-    final canSend = _hasText && !widget.loading;
+    final canSend = _hasText && !_tooLong && !widget.loading;
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -74,6 +91,31 @@ class _MessageInputState extends State<MessageInput> {
               focusNode: _focusNode,
               maxLines: 4,
               minLines: 1,
+              // 입력은 자르지 않는다(maxLength 없음). 자르면 앞뒤 공백까지 세어서,
+              // 공백을 지우고 보내면 한도 안인 질문의 끝이 잘려 나갈 수 있다.
+              // 카운터와 전송 가능 여부는 서버가 받는 값(앞뒤 공백 제거)의 서버 기준 길이로 판단한다.
+              // 이모지·NFD 한글이 섞이면 보이는 글자가 한도 이내여도 서버 기준으로는 넘을 수 있다.
+              // 평소에는 숨기고 한도에 가까워졌을 때만 보여 준다
+              buildCounter:
+                  (
+                    context, {
+                    required currentLength,
+                    required isFocused,
+                    required maxLength,
+                  }) {
+                    const max = SendChatRequest.maxQuestionLength;
+                    final length = _serverLength;
+                    if (length < max * 0.9) return null;
+                    return Text(
+                      '$length / $max',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: length > max
+                            ? _overLimitColor
+                            : colors.textSecondary,
+                      ),
+                    );
+                  },
               style: TextStyle(fontSize: 14, color: colors.text),
               decoration: InputDecoration(
                 hintText: widget.placeholder,

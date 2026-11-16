@@ -32,12 +32,21 @@ class MyHomePage extends StatefulWidget {
 /// flutter run --dart-define=GIST_CHATBOT_WIDGET_KEY=wk_live_xxx
 const _widgetKey = String.fromEnvironment('GIST_CHATBOT_WIDGET_KEY');
 
+/// 스테이징 등 다른 서버로 붙을 때만 지정한다. 비우면 운영 서버를 쓴다:
+/// --dart-define=GIST_CHATBOT_API_BASE_URL=https://api.stg.chatbot.gistory.me/api
+const _apiBaseUrl = String.fromEnvironment('GIST_CHATBOT_API_BASE_URL');
+
 class _MyHomePageState extends State<MyHomePage> {
   // 패키지는 트리거 UI를 제공하지 않는다.
   // 앱이 GistChatbot 인스턴스를 만들고, 원하는 위젯에서 open()을 호출한다.
   final _chatbot = _widgetKey.isEmpty
       ? null
-      : GistChatbot(config: const GistChatbotConfig(widgetKey: _widgetKey));
+      : GistChatbot(
+          config: const GistChatbotConfig(
+            widgetKey: _widgetKey,
+            apiBaseUrl: _apiBaseUrl == '' ? kDefaultApiBaseUrl : _apiBaseUrl,
+          ),
+        );
 
   @override
   void dispose() {

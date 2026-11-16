@@ -2,17 +2,21 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-/// 429 경고 배너 + 재시도 카운트다운 (웹 위젯과 동일)
+/// 세션 질문 한도 소진 배너 + 재시도 카운트다운 (웹 위젯과 동일)
 class RateLimitBanner extends StatefulWidget {
   const RateLimitBanner({
     super.key,
     required this.retryAt,
     required this.onExpired,
+    this.limit,
   });
 
   /// 재시도 가능 시각 (ms since epoch)
   final int retryAt;
   final VoidCallback onExpired;
+
+  /// 서버가 알려 준 세션 질문 한도. 모르면 숫자 없이 안내한다.
+  final int? limit;
 
   @override
   State<RateLimitBanner> createState() => _RateLimitBannerState();
@@ -79,9 +83,11 @@ class _RateLimitBannerState extends State<RateLimitBanner> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '한 번에 최대 5번까지만 질문할 수 있습니다.',
-              style: TextStyle(
+            Text(
+              widget.limit != null
+                  ? '한 번에 최대 ${widget.limit}번까지만 질문할 수 있습니다.'
+                  : '질문 횟수를 모두 사용했습니다.',
+              style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFF7F1D1D),

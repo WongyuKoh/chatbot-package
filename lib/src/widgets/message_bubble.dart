@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../config/gist_chatbot_config.dart';
 import '../state/chat_message.dart';
+import 'external_link.dart';
 import 'loading_shimmer.dart';
 import 'pressable.dart';
+import 'research_steps.dart';
 
 /// 메시지 말풍선 (웹 위젯과 동일: user는 primary 10%/25%, assistant는 흰 배경+테두리)
 class MessageBubble extends StatelessWidget {
@@ -20,13 +21,15 @@ class MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final GistChatbotColors colors;
 
-  /// 스트리밍 텍스트가 아직 없을 때 로딩 문구를 표시
+  /// 스트리밍 텍스트가 아직 없을 때 로딩 문구를 표시.
+  /// 조사 단계가 있으면 [loadingMessage] 대신 단계 목록을 보여 준다.
   final bool isLoadingPlaceholder;
   final String loadingMessage;
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
+    final waitingForText = message.text.isEmpty && isLoadingPlaceholder;
 
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -56,13 +59,26 @@ class MessageBubble extends StatelessWidget {
                 message.text,
                 style: TextStyle(color: colors.text, fontSize: 14, height: 1.4),
               )
-            else if (message.text.isEmpty && isLoadingPlaceholder)
-              LoadingIndicatorRow(
-                message: loadingMessage,
-                color: colors.textSecondary,
-              )
-            else
-              _AssistantMarkdown(text: message.text, colors: colors),
+            else ...[
+              // 조사 단계: 본문 전에는 펼쳐서, 본문이 오면 한 줄 요약으로
+              if (message.steps.isNotEmpty)
+                ResearchSteps(
+                  // 같은 자리에 다른 답변이 오면(재생성) 펼침 상태를 새로 시작하고,
+                  // 답변별 펼침 상태를 PageStorage에 저장하는 키로도 쓴다
+                  key: PageStorageKey('research_steps_${message.id}'),
+                  steps: message.steps,
+                  colors: colors,
+                  live: waitingForText,
+                )
+              else if (waitingForText)
+                LoadingIndicatorRow(
+                  message: loadingMessage,
+                  color: colors.textSecondary,
+                ),
+              if (!waitingForText &&
+                  (message.text.isNotEmpty || message.steps.isEmpty))
+                _AssistantMarkdown(text: message.text, colors: colors),
+            ],
             if (message.sources.isNotEmpty)
               _SourcesSection(sources: message.sources, colors: colors),
           ],
@@ -109,10 +125,7 @@ class _AssistantMarkdown extends StatelessWidget {
           style: TextStyle(color: colors.text, fontSize: 14, height: 1.4),
           linkBuilder: (context, span, url, style) {
             return GestureDetector(
-              onTap: () => launchUrl(
-                Uri.parse(url),
-                mode: LaunchMode.externalApplication,
-              ),
+              onTap: () => openExternalLink(url),
               child: Text.rich(
                 span,
                 style: style.copyWith(
@@ -129,7 +142,8 @@ class _AssistantMarkdown extends StatelessWidget {
   }
 }
 
-/// 출처 영역: 상단 구분선 + 배지 + 이미지 (웹 위젯과 동일)
+/// 출처 영역: 상단 구분선 + 배지 + 이미지.
+/// 배지는 서버가 준 순서(내부 문서 → 공지 → 웹)를 그대로 따른다.
 class _SourcesSection extends StatelessWidget {
   const _SourcesSection({required this.sources, required this.colors});
 
@@ -171,13 +185,45 @@ class _SourceBadge extends StatelessWidget {
   final ChatSource source;
   final GistChatbotColors colors;
 
+  /// 출처 종류를 아이콘과 스크린리더 문구로 구분한다 (내부 문서 / Ziggle 공지 / 웹)
+  (IconData, String) get _kind => switch (source.kind) {
+    ChatSourceKind.document => (Icons.description_outlined, '참고 문서'),
+    ChatSourceKind.notice => (Icons.campaign_outlined, 'Ziggle 공지'),
+    ChatSourceKind.web => (
+      Icons.public,
+      source.official ? '학교 공식 웹 출처' : '외부 웹 출처',
+    ),
+  };
+
+  /// 학교 공식 도메인이 아닌 웹 출처. 공식이어도 내용의 정확성을 보증하지는 않으므로
+  /// 공식 쪽을 강조하지 않고 외부 쪽에만 표시를 붙인다.
+  bool get _isExternalWeb =>
+      source.kind == ChatSourceKind.web && !source.official;
+
+  String get _title {
+    final title = source.title ?? Uri.tryParse(source.url)?.host ?? source.url;
+    // 웹 출처 제목은 보통 호스트명이라 www.는 떼고 보여 준다
+    return source.kind == ChatSourceKind.web
+        ? title.replaceFirst(RegExp(r'^www\.'), '')
+        : title;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final (icon, kindLabel) = _kind;
+    return Semantics(
+      link: true,
+      label: '$kindLabel: $_title',
+      excludeSemantics: true,
+      // 하위 Pressable의 tap 액션이 제외되므로 스크린리더 활성화를 여기서 연결한다
+      onTap: () => openExternalLink(source.url),
+      child: _buildBadge(icon),
+    );
+  }
+
+  Widget _buildBadge(IconData icon) {
     return Pressable(
-      onTap: () => launchUrl(
-        Uri.parse(source.url),
-        mode: LaunchMode.externalApplication,
-      ),
+      onTap: () => openExternalLink(source.url),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
@@ -188,11 +234,11 @@ class _SourceBadge extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.link, size: 12, color: colors.text),
+            Icon(icon, size: 12, color: colors.text),
             const SizedBox(width: 6),
             Flexible(
               child: Text(
-                source.title ?? Uri.tryParse(source.url)?.host ?? source.url,
+                _title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -204,6 +250,18 @@ class _SourceBadge extends StatelessWidget {
                 ),
               ),
             ),
+            if (_isExternalWeb) ...[
+              const SizedBox(width: 6),
+              Text(
+                '외부',
+                style: TextStyle(
+                  color: colors.textSecondary,
+                  fontSize: 10,
+                  height: 1.2,
+                  leadingDistribution: TextLeadingDistribution.even,
+                ),
+              ),
+            ],
             const SizedBox(width: 6),
             Icon(Icons.open_in_new, size: 12, color: colors.text),
           ],
@@ -225,10 +283,7 @@ class _SourceImage extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: GestureDetector(
-        onTap: () => launchUrl(
-          Uri.parse(source.url),
-          mode: LaunchMode.externalApplication,
-        ),
+        onTap: () => openExternalLink(source.url),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Image.network(

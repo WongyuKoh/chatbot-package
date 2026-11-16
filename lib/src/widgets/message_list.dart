@@ -30,7 +30,9 @@ class MessageList extends StatefulWidget {
 
 class _MessageListState extends State<MessageList> {
   final ScrollController _scrollController = ScrollController();
-  String _scrollSignal = '';
+
+  /// 직전 알림 때의 메시지 목록 (말풍선 높이 변화 비교용)
+  List<ChatMessage> _lastMessages = const [];
   String? _lastUserMessageId;
 
   /// 하단 따라가기 여부. 사용자가 위로 스크롤하면 끄고, 바닥으로 돌아오면 다시 켬
@@ -44,6 +46,9 @@ class _MessageListState extends State<MessageList> {
 
   /// 레이아웃 중 요청된 버튼 갱신이 다음 프레임으로 예약돼 있는지 여부
   bool _scrollButtonUpdateScheduled = false;
+
+  /// 길이 변화에 따른 바닥 이동이 다음 프레임으로 예약돼 있는지 여부
+  bool _followScheduled = false;
 
   @override
   void initState() {
@@ -73,14 +78,44 @@ class _MessageListState extends State<MessageList> {
     return null;
   }
 
+  /// 말풍선 높이가 달라졌을 수 있는 변화인지. 피드백처럼 높이와 무관한 값은 보지 않는다.
+  /// 조사 단계가 늘거나 문구가 바뀌어도 높이가 달라지므로 단계도 비교한다.
+  static bool _sameLayout(ChatMessage a, ChatMessage b) {
+    if (identical(a, b)) return true;
+    if (a.id != b.id ||
+        a.text.length != b.text.length ||
+        a.sources.length != b.sources.length ||
+        a.steps.length != b.steps.length) {
+      return false;
+    }
+    for (var i = 0; i < a.steps.length; i++) {
+      final (x, y) = (a.steps[i], b.steps[i]);
+      if (x.label.length != y.label.length ||
+          (x.thought?.length ?? 0) != (y.thought?.length ?? 0)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// 직전 알림과 비교해 어느 메시지든 높이가 달라졌을 수 있으면 true.
+  /// 메시지는 바뀔 때마다 새 객체가 되므로 대부분은 identical 비교로 끝나고,
+  /// 바뀐 메시지만 필드를 비교한다. 마지막이 아닌 답변도 나중에 바뀔 수 있다
+  /// (다음 질문을 보낸 뒤 끝난 히스토리 동기화·복구 등).
+  bool _layoutChanged(List<ChatMessage> messages) {
+    final previous = _lastMessages;
+    _lastMessages = messages;
+    if (previous.length != messages.length) return true;
+    for (var i = 0; i < messages.length; i++) {
+      if (!_sameLayout(previous[i], messages[i])) return true;
+    }
+    return false;
+  }
+
   /// 메시지 본문/로딩 변화에만 하단 스크롤.
   /// 피드백 등 메타 갱신 시 스크롤하면 화면이 튀므로 제외 (웹과 동일)
   void _onUpdate() {
-    final signal = widget.controller.messages
-        .map((m) => '${m.id}:${m.text.length}:${m.sources.length}')
-        .join('|');
-    if (signal == _scrollSignal) return;
-    _scrollSignal = signal;
+    if (!_layoutChanged(widget.controller.messages)) return;
 
     // 사용자가 새 질문을 보내면 스크롤 위치와 관계없이 다시 따라감
     final lastUserMessageId = _findLastUserMessageId();
@@ -131,9 +166,13 @@ class _MessageListState extends State<MessageList> {
     if (notification is UserScrollNotification &&
         notification.direction == ScrollDirection.forward) {
       _follow = false;
-    } else if (notification is ScrollEndNotification &&
-        notification.metrics.extentAfter < 1) {
-      _follow = true;
+    } else if (notification is ScrollEndNotification) {
+      if (notification.metrics.extentAfter < 1) {
+        _follow = true;
+      } else if (_follow) {
+        // 스크롤 애니메이션 도중 길어진 만큼 마저 내려감
+        _followToBottom();
+      }
     }
     _updateScrollButton();
     return false;
@@ -143,8 +182,38 @@ class _MessageListState extends State<MessageList> {
   /// 위로 올려 둔 동안 아래에서 답변이 길어지면 위치는 그대로고 바닥까지 거리만 늘어나므로,
   /// 콘텐츠 길이 변화는 ScrollMetricsNotification으로 따로 받아 버튼 표시를 갱신
   bool _onScrollMetricsNotification(ScrollMetricsNotification notification) {
-    if (notification.depth == 0) _updateScrollButton();
+    if (notification.depth != 0) return false;
+    _updateScrollButton();
+    // 답변이 끝난 뒤 늦게 붙는 피드백 줄·첨부 이미지, 키보드로 줄어든 화면처럼
+    // 메시지 신호에 잡히지 않는 길이 변화도 따라가는 중이면 바닥에 맞춤
+    if (_follow && notification.metrics.extentAfter > 0) _followToBottom();
     return false;
+  }
+
+  /// 레이아웃 도중에는 스크롤 위치를 바꿀 수 없으므로 프레임이 끝난 뒤 바닥으로 이동
+  void _followToBottom() {
+    if (_followScheduled) return;
+    _followScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followScheduled = false;
+      if (!mounted ||
+          !_follow ||
+          _scrollingToBottom ||
+          !_scrollController.hasClients) {
+        return;
+      }
+      final position = _scrollController.position;
+      // 새 질문 전송 애니메이션이나 사용자의 드래그가 진행 중이면 끊지 않음.
+      // 끝난 뒤에도 바닥과 벌어져 있으면 ScrollEndNotification에서 다시 맞춤
+      if (position.isScrollingNotifier.value) return;
+      if (position.extentAfter > 0) {
+        _scrollController.jumpTo(position.maxScrollExtent);
+      }
+    });
+    // addPostFrameCallback은 다음 프레임을 기다리기만 하고 요청하지는 않는다.
+    // 길이 변화 알림은 프레임이 끝난 뒤 오므로, 화면이 멈춘 상태에서 높이만 바뀌면
+    // 다른 갱신이 있을 때까지 바닥 이동이 미뤄진다. 다음 프레임을 직접 요청한다
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   /// 따라가는 중에는 숨김: 스트리밍 중 바닥과 잠깐 벌어질 때 깜빡이지 않도록
