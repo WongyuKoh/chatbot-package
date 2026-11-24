@@ -1,3 +1,14 @@
+## 0.1.3
+
+- `GistChatbotConfig.clientId`: an optional user ID sent when a session is
+  created, so sessions with the same ID share the question limit. Leave it unset
+  until the backend accepts it; older backends reject it
+- The question limit banner follows the per-widget-key limits: it shows the
+  limit period ("1일 동안 최대 20번") and counts down to the server's
+  `retryAfterSeconds`; longer waits are shown in hours and days
+- With an older backend that sends neither, the banner and retry time work as
+  before
+
 ## 0.1.2
 
 - Research steps from the chat stream: shown live while the answer is being
