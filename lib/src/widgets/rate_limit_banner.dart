@@ -2,21 +2,25 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-/// 세션 질문 한도 소진 배너 + 재시도 카운트다운 (웹 위젯과 동일)
+/// 질문 한도 소진 배너 + 재시도 카운트다운
 class RateLimitBanner extends StatefulWidget {
   const RateLimitBanner({
     super.key,
     required this.retryAt,
     required this.onExpired,
     this.limit,
+    this.windowSeconds,
   });
 
   /// 재시도 가능 시각 (ms since epoch)
   final int retryAt;
   final VoidCallback onExpired;
 
-  /// 서버가 알려 준 세션 질문 한도. 모르면 숫자 없이 안내한다.
+  /// 서버가 알려 준 질문 한도. 모르면 숫자 없이 안내한다.
   final int? limit;
+
+  /// 한도를 세는 기간(초). 이전 서버(세션당 고정 한도)는 보내지 않는다.
+  final int? windowSeconds;
 
   @override
   State<RateLimitBanner> createState() => _RateLimitBannerState();
@@ -56,16 +60,34 @@ class _RateLimitBannerState extends State<RateLimitBanner> {
     }
     final sec = ((widget.retryAt - now) / 1000).ceil();
     setState(() {
-      if (sec < 60) {
-        _remainingText = '$sec초 후에 다시 시도할 수 있습니다.';
-      } else {
-        final min = sec ~/ 60;
-        final s = sec % 60;
-        _remainingText = s == 0
-            ? '$min분 후에 다시 시도할 수 있습니다.'
-            : '$min분 $s초 후에 다시 시도할 수 있습니다.';
-      }
+      _remainingText = '${_formatRemaining(sec)} 후에 다시 시도할 수 있습니다.';
     });
+  }
+
+  /// 기간 한도에서는 남은 시간이 몇 시간·며칠일 수 있어 큰 단위 두 개까지 보여 준다
+  static String _formatRemaining(int sec) {
+    String pair(int big, String bigUnit, int small, String smallUnit) =>
+        small == 0 ? '$big$bigUnit' : '$big$bigUnit $small$smallUnit';
+    if (sec < 60) return '$sec초';
+    if (sec < 3600) return pair(sec ~/ 60, '분', sec % 60, '초');
+    if (sec < 86400) return pair(sec ~/ 3600, '시간', sec % 3600 ~/ 60, '분');
+    return pair(sec ~/ 86400, '일', sec % 86400 ~/ 3600, '시간');
+  }
+
+  /// 한도 기간을 나누어떨어지는 가장 큰 단위로 (86400 → 1일, 5400 → 90분)
+  static String _formatWindow(int sec) {
+    if (sec % 86400 == 0) return '${sec ~/ 86400}일';
+    if (sec % 3600 == 0) return '${sec ~/ 3600}시간';
+    if (sec % 60 == 0) return '${sec ~/ 60}분';
+    return '$sec초';
+  }
+
+  String get _limitText {
+    final limit = widget.limit;
+    final window = widget.windowSeconds;
+    if (limit == null) return '질문 횟수를 모두 사용했습니다.';
+    if (window == null) return '한 번에 최대 $limit번까지만 질문할 수 있습니다.';
+    return '${_formatWindow(window)} 동안 최대 $limit번까지 질문할 수 있습니다.';
   }
 
   @override
@@ -84,9 +106,7 @@ class _RateLimitBannerState extends State<RateLimitBanner> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              widget.limit != null
-                  ? '한 번에 최대 ${widget.limit}번까지만 질문할 수 있습니다.'
-                  : '질문 횟수를 모두 사용했습니다.',
+              _limitText,
               style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,

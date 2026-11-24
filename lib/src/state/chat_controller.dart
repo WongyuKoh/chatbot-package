@@ -82,11 +82,12 @@ class ChatController extends ChangeNotifier {
   Future<void>? _followUp;
   bool _disposed = false;
 
-  /// 세션 질문 한도 소진(429 + limit) 시 재시도 가능 시각(ms). null이면 경고 없음
+  /// 질문 한도 소진(429 + limit) 시 재시도 가능 시각(ms). null이면 경고 없음
   int? _rateLimitRetryAt;
 
-  /// 서버가 알려 준 세션 질문 한도 (배너 문구용)
+  /// 서버가 알려 준 질문 한도와 그 기간(초) (배너 문구용)
   int? _questionLimit;
+  int? _questionWindowSeconds;
 
   /// 피드백 전송 중인 메시지 ID (중복 클릭 방지)
   String? _feedbackBusyId;
@@ -96,6 +97,7 @@ class ChatController extends ChangeNotifier {
   String get loadingMessage => _loadingMessage;
   int? get rateLimitRetryAt => _rateLimitRetryAt;
   int? get questionLimit => _questionLimit;
+  int? get questionWindowSeconds => _questionWindowSeconds;
   String? get feedbackBusyId => _feedbackBusyId;
 
   /// 자주 묻는 질문 표시 여부: 사용자가 한 번이라도 보내면 숨김 (웹과 동일)
@@ -252,7 +254,11 @@ class ChatController extends ChangeNotifier {
     final appId = await resolveAppId(_config.appId);
     _resolvedAppId = appId;
     final response = await _apiClient.createSession(
-      api.CreateSessionRequest(widgetKey: _config.widgetKey, appId: appId),
+      api.CreateSessionRequest(
+        widgetKey: _config.widgetKey,
+        appId: appId,
+        clientId: _config.clientId,
+      ),
     );
     _apiClient.setSessionToken(response.sessionToken);
     await _sessionManager.saveSession(
@@ -391,6 +397,7 @@ class ChatController extends ChangeNotifier {
 
     _rateLimitRetryAt = null;
     _questionLimit = null;
+    _questionWindowSeconds = null;
     _messages.add(
       ChatMessage(id: _uid(), role: MessageRole.user, text: trimmed),
     );
@@ -621,10 +628,19 @@ class ChatController extends ChangeNotifier {
     }
 
     if (e is ChatApiException && e.isQuestionLimit) {
-      // 세션 질문 한도 소진: placeholder 제거 + 배너 카운트다운
-      // (새 세션을 받을 수 있는 시각 = 현재 세션 만료)
+      // 질문 한도 소진: placeholder 제거 + 배너 카운트다운
       _messages.removeWhere((m) => m.id == assistantId);
       _questionLimit = e.limit;
+      _questionWindowSeconds = e.windowSeconds;
+      final retryAfter = e.retryAfterSeconds;
+      if (retryAfter != null) {
+        // 서버가 알려 준 남은 시간. clientId를 보냈다면 새 세션을 받아도 횟수가 이어진다
+        _rateLimitRetryAt =
+            DateTime.now().millisecondsSinceEpoch + retryAfter * 1000;
+        return;
+      }
+      // 이전 서버(세션당 고정 한도)는 남은 시간을 주지 않는다.
+      // 새 세션을 받을 수 있는 시각 = 현재 세션 만료
       _sessionManager.expiresAt().then((retryAt) {
         if (retryAt != null) {
           _rateLimitRetryAt = retryAt;
@@ -700,6 +716,7 @@ class ChatController extends ChangeNotifier {
     if (_rateLimitRetryAt == null) return;
     _rateLimitRetryAt = null;
     _questionLimit = null;
+    _questionWindowSeconds = null;
     notifyListeners();
   }
 

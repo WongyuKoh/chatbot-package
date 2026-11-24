@@ -64,6 +64,7 @@ class GistChatbotConfig {
     this.resourceCenterUrl = kDefaultResourceCenterUrl,
     this.appId,
     this.accessToken,
+    this.clientId,
     this.reportUrl = 'https://cs.gistory.me?service=chatbot',
     this.colors = const GistChatbotColors(),
   });
@@ -81,6 +82,14 @@ class GistChatbotConfig {
   /// 앱 식별자. null이면 package_info_plus로 자동 획득.
   final String? appId;
   final String? accessToken;
+
+  /// 사용자를 구분하는 ID (1~128자). 지정하면 세션 발급 때 서버로 보내고,
+  /// 같은 값으로 발급한 세션끼리 질문 한도를 함께 센다. null이면 보내지 않고
+  /// 서버는 세션마다 따로 센다.
+  ///
+  /// 남이 알 수 없는 값을 써야 한다. 학번·이메일처럼 알려진 값을 쓰면 다른 사람이
+  /// 같은 값을 보내 그 사용자의 한도를 소진시킬 수 있다.
+  final String? clientId;
 
   /// 헤더 신고 버튼이 여는 URL.
   final String reportUrl;

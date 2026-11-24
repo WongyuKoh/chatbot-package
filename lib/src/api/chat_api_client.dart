@@ -8,17 +8,30 @@ import 'chat_api_types.dart';
 
 /// API 호출 예외
 class ChatApiException implements Exception {
-  ChatApiException(this.message, {this.statusCode, this.limit});
+  ChatApiException(
+    this.message, {
+    this.statusCode,
+    this.limit,
+    this.windowSeconds,
+    this.retryAfterSeconds,
+  });
 
   final String message;
   final int? statusCode;
 
-  /// 429 응답 본문의 `limit` (세션 질문 한도). 일시적 과부하 429에는 없다.
+  /// 429 응답 본문의 `limit` (기간 안의 질문 한도). 일시적 과부하 429에는 없다.
+  /// 값은 위젯 키마다 다르므로 값이 아니라 있는지로 판단한다.
   final int? limit;
+
+  /// 질문 한도를 세는 기간(초). 이전 서버(세션당 고정 한도)는 보내지 않는다.
+  final int? windowSeconds;
+
+  /// 다시 질문할 수 있을 때까지 남은 시간(초). 이전 서버는 보내지 않는다.
+  final int? retryAfterSeconds;
 
   bool get isRateLimit => statusCode == 429;
 
-  /// 세션 질문 횟수를 다 쓴 429. `limit` 없는 429(동시 요청·빈도 제한)와 구분한다.
+  /// 질문 한도를 다 쓴 429. `limit` 없는 429(동시 요청·빈도 제한)와 구분한다.
   bool get isQuestionLimit => isRateLimit && limit != null;
 
   @override
@@ -67,6 +80,8 @@ ChatApiException _errorFromResponse(String body, int statusCode) {
   }
   var message = body;
   int? limit;
+  int? windowSeconds;
+  int? retryAfterSeconds;
   try {
     final json = jsonDecode(body);
     if (json is Map<String, dynamic>) {
@@ -77,11 +92,22 @@ ChatApiException _errorFromResponse(String body, int statusCode) {
       } else if (msg is String && msg.isNotEmpty) {
         message = msg;
       }
-      final rawLimit = json['limit'];
-      if (rawLimit is num) limit = rawLimit.toInt();
+      int? number(String key) => switch (json[key]) {
+        final num value => value.toInt(),
+        _ => null,
+      };
+      limit = number('limit');
+      windowSeconds = number('windowSeconds');
+      retryAfterSeconds = number('retryAfterSeconds');
     }
   } catch (_) {}
-  return ChatApiException(message, statusCode: statusCode, limit: limit);
+  return ChatApiException(
+    message,
+    statusCode: statusCode,
+    limit: limit,
+    windowSeconds: windowSeconds,
+    retryAfterSeconds: retryAfterSeconds,
+  );
 }
 
 /// 처리하는 SSE 이벤트 type. 이 밖의 type은 무시한다.

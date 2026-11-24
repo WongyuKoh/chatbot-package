@@ -51,6 +51,7 @@ class _ChatScreenState extends State<ChatScreen> {
             RateLimitBanner(
               retryAt: retryAt,
               limit: controller.questionLimit,
+              windowSeconds: controller.questionWindowSeconds,
               onExpired: controller.clearRateLimitWarning,
             ),
           MessageInput(

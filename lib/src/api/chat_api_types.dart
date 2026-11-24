@@ -6,16 +6,22 @@ class CreateSessionRequest {
     required this.widgetKey,
     this.clientType = 'app',
     required this.appId,
+    this.clientId,
   });
 
   final String widgetKey;
   final String clientType;
   final String appId;
 
+  /// 기기에 저장해 둔 무작위 ID. 같은 값을 보낸 세션끼리 질문 한도를 함께 센다.
+  /// 없으면 보내지 않고, 서버는 세션마다 따로 센다.
+  final String? clientId;
+
   Map<String, dynamic> toJson() => {
     'widgetKey': widgetKey,
     'clientType': clientType,
     'appId': appId,
+    if (clientId != null) 'clientId': clientId,
   };
 }
 
